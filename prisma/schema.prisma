@@ -1,0 +1,39 @@
+// Prisma schema for LinkForge.
+// The Url model implements docs/url-entity-design.md — see that document
+// for the reasoning behind each field and index.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Url {
+  id            BigInt    @id @default(autoincrement())
+  // Public identifier: either a generated base62 code or a custom alias.
+  // Postgres default collation is case-sensitive, which base62 requires.
+  shortCode     String    @unique @map("short_code") @db.VarChar(32)
+  isCustomAlias Boolean   @default(false) @map("is_custom_alias")
+  originalUrl   String    @map("original_url")
+  // SHA-256 hex of originalUrl; index proxy for dedup lookups.
+  urlHash       String    @map("url_hash") @db.Char(64)
+  clickCount    BigInt    @default(0) @map("click_count")
+  isActive      Boolean   @default(true) @map("is_active")
+  // Design doc calls for a partial index (WHERE expires_at IS NOT NULL);
+  // Prisma cannot declare partial indexes, so this is a full index for now.
+  expiresAt     DateTime? @map("expires_at") @db.Timestamptz(6)
+  // Future FK to User; nullable so anonymous shortening works before auth.
+  createdBy     BigInt?   @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  // Soft delete: codes are tombstoned, never recycled.
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  @@index([urlHash])
+  @@index([expiresAt])
+  @@index([createdBy, createdAt(sort: Desc)])
+  @@map("urls")
+}
