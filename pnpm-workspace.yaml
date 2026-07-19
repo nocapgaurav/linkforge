@@ -1,4 +1,10 @@
+packages:
+  - frontend
+
 allowBuilds:
   '@prisma/engines': true
+  '@tailwindcss/oxide': true
   esbuild: true
   prisma: true
+  sharp: true
+  unrs-resolver: true

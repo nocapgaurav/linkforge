@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { analyticsRouter } from '../modules/analytics/analytics.routes.js';
 import { urlRouter } from '../modules/url/url.routes.js';
 
 /** Liveness probe, mounted at the domain root ahead of all other routes. */
@@ -15,6 +16,7 @@ healthRouter.get('/health', (_req, res) => {
  */
 const v1Router = Router();
 v1Router.use('/urls', urlRouter);
+v1Router.use('/urls', analyticsRouter);
 
 export const apiRouter = Router();
 apiRouter.use('/v1', v1Router);

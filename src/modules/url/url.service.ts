@@ -1,4 +1,5 @@
-import { createHash, randomInt } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { clickSink, NullClickSink, type ClickSink } from '../analytics/click.sink.js';
 import { urlRepository, type UrlRepository } from './url.repository.js';
 import {
   NullRedirectCache,
@@ -12,7 +13,15 @@ import {
   UrlNotFoundError,
 } from './url.errors.js';
 import { ShortCodeConflictError, type Url } from './url.types.js';
-import type { CreateUrlBody } from './url.validation.js';
+import type { CreateUrlBody, ListUrlsQuery } from './url.validation.js';
+
+/** One page of the newest-first link listing. */
+export interface UrlListPage {
+  items: Url[];
+  /** Opaque `<createdAtMs>_<id>` keyset cursor; null on the last page. */
+  nextCursor: string | null;
+  hasMore: boolean;
+}
 
 const BASE62_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
@@ -79,6 +88,13 @@ export interface UrlService {
    * database commit. Throws UrlNotFoundError if no live URL has the code.
    */
   delete(shortCode: string): Promise<Date>;
+
+  /**
+   * Cursor-paginated listing, newest first. Fetches one row beyond the
+   * requested page to learn whether more exist; `nextCursor` encodes the
+   * last returned row's (createdAt, id) keyset position.
+   */
+  list(query: ListUrlsQuery): Promise<UrlListPage>;
 }
 
 /**
@@ -95,6 +111,7 @@ export class DefaultUrlService implements UrlService {
   constructor(
     private readonly urls: UrlRepository,
     private readonly cache: RedirectCache = new NullRedirectCache(),
+    private readonly clicks: ClickSink = new NullClickSink(),
   ) {}
 
   async create(input: CreateUrlBody): Promise<Url> {
@@ -157,6 +174,7 @@ export class DefaultUrlService implements UrlService {
       if (!this.isRedirectable(cached)) {
         throw new UrlNotFoundError(shortCode);
       }
+      this.recordClick(cached.id);
       return cached;
     }
 
@@ -173,11 +191,13 @@ export class DefaultUrlService implements UrlService {
     }
     this.fireAndForget(() =>
       this.cache.set(shortCode, {
+        id: url.id,
         originalUrl: url.originalUrl,
         isActive: url.isActive,
         expiresAt: url.expiresAt,
       }),
     );
+    this.recordClick(url.id);
     return url;
   }
 
@@ -203,6 +223,34 @@ export class DefaultUrlService implements UrlService {
     // by the time the client sees the deletion response.
     await this.invalidate(shortCode);
     return deletedAt;
+  }
+
+  async list(query: ListUrlsQuery): Promise<UrlListPage> {
+    // Over-fetch by one: the extra row proves a next page exists without a
+    // second COUNT query, and is never returned to the caller.
+    const rows = await this.urls.list({ limit: query.limit + 1, before: query.cursor });
+    const hasMore = rows.length > query.limit;
+    const items = hasMore ? rows.slice(0, query.limit) : rows;
+    const last = items.at(-1);
+    const nextCursor = hasMore && last ? `${last.createdAt.getTime()}_${last.id}` : null;
+    return { items, nextCursor, hasMore };
+  }
+
+  /**
+   * Emit analytics for one APPROVED redirect — called only after the
+   * visibility rules have passed, so dead links never produce events.
+   * Both writes are fire-and-forget: the redirect never waits on
+   * analytics, and failures are dropped (the sink and the guard both
+   * swallow). The eventId minted here is the idempotency key that makes
+   * any future replay of this event safe. clickCount is an approximate
+   * display counter; click_events is the source of truth.
+   */
+  private recordClick(urlId: bigint): void {
+    const eventId = randomUUID();
+    this.fireAndForget(() =>
+      this.clicks.record({ eventId, urlId, occurredAt: new Date() }),
+    );
+    this.fireAndForget(() => this.urls.incrementClickCount(urlId));
   }
 
   /** Redirect rule: active and (never expires or not yet expired). */
@@ -265,5 +313,9 @@ export class DefaultUrlService implements UrlService {
   }
 }
 
-/** Application-wide service wired to the Prisma repository and the cache. */
-export const urlService: UrlService = new DefaultUrlService(urlRepository, redirectCache);
+/** Application-wide service: Prisma repository, redirect cache, click sink. */
+export const urlService: UrlService = new DefaultUrlService(
+  urlRepository,
+  redirectCache,
+  clickSink,
+);

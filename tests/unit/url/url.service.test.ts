@@ -9,6 +9,7 @@ import {
 } from '../../../src/modules/url/url.errors';
 import { ShortCodeConflictError, type Url } from '../../../src/modules/url/url.types';
 import type { CachedRedirect, RedirectCache } from '../../../src/modules/url/url.cache';
+import type { ClickSink } from '../../../src/modules/analytics/click.sink';
 
 const BASE62_CODE = /^[0-9A-Za-z]{7}$/;
 
@@ -35,6 +36,7 @@ function makeRepo() {
     create: vi.fn(),
     findByShortCode: vi.fn(),
     findById: vi.fn(),
+    list: vi.fn(),
     update: vi.fn(),
     incrementClickCount: vi.fn(),
     softDelete: vi.fn(),
@@ -224,6 +226,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
   describe('getByShortCode', () => {
     it('serves a valid positive hit from the cache without touching the repository', async () => {
       const view: CachedRedirect = {
+        id: 9n,
         originalUrl: 'https://example.com/cached',
         isActive: true,
         expiresAt: null,
@@ -237,6 +240,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
 
     it('re-evaluates rules on hits: an expired cached entry 404s without a DB read', async () => {
       const cache = makeCache({
+        id: 9n,
         originalUrl: 'https://example.com/',
         isActive: true,
         expiresAt: new Date(Date.now() - 1000),
@@ -249,6 +253,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
 
     it('re-evaluates rules on hits: an inactive cached entry 404s without a DB read', async () => {
       const cache = makeCache({
+        id: 9n,
         originalUrl: 'https://example.com/',
         isActive: false,
         expiresAt: null,
@@ -278,6 +283,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
       await flushAsync();
       expect(cache.set).toHaveBeenCalledWith('aB3xK9q', {
+        id: 1n,
         originalUrl: 'https://example.com/',
         isActive: true,
         expiresAt,
@@ -349,6 +355,184 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
 
       await expect(service.delete('nope123')).rejects.toThrow(UrlNotFoundError);
       expect(cache.del).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('list (cursor pagination)', () => {
+    it('over-fetches by one and reports no next page when the extra row is absent', async () => {
+      const rows = [makeUrl({ id: 3n }), makeUrl({ id: 2n })];
+      repo.list.mockResolvedValue(rows);
+      const service = new DefaultUrlService(repo, makeCache());
+
+      const page = await service.list({ limit: 2 });
+
+      expect(repo.list).toHaveBeenCalledWith({ limit: 3, before: undefined });
+      expect(page.items).toEqual(rows);
+      expect(page.hasMore).toBe(false);
+      expect(page.nextCursor).toBeNull();
+    });
+
+    it('slices the extra row off and encodes the last visible row as nextCursor', async () => {
+      const createdAt = new Date('2026-07-19T10:00:00.000Z');
+      repo.list.mockResolvedValue([
+        makeUrl({ id: 9n }),
+        makeUrl({ id: 8n, createdAt }),
+        makeUrl({ id: 7n }),
+      ]);
+      const service = new DefaultUrlService(repo, makeCache());
+
+      const page = await service.list({ limit: 2 });
+
+      expect(page.items.map((u) => u.id)).toEqual([9n, 8n]);
+      expect(page.hasMore).toBe(true);
+      expect(page.nextCursor).toBe(`${createdAt.getTime()}_8`);
+    });
+
+    it('passes the parsed cursor through as the keyset position', async () => {
+      repo.list.mockResolvedValue([]);
+      const service = new DefaultUrlService(repo, makeCache());
+      const cursor = { createdAt: new Date('2026-07-01T00:00:00Z'), id: 5n };
+
+      const page = await service.list({ limit: 20, cursor });
+
+      expect(repo.list).toHaveBeenCalledWith({ limit: 21, before: cursor });
+      expect(page).toEqual({ items: [], nextCursor: null, hasMore: false });
+    });
+  });
+
+  describe('analytics emission (ClickSink)', () => {
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    function makeSink() {
+      return { record: vi.fn().mockResolvedValue(undefined) } satisfies ClickSink;
+    }
+
+    it('records a click on a cache hit, attributed via the cached id', async () => {
+      const cache = makeCache({
+        id: 9n,
+        originalUrl: 'https://example.com/',
+        isActive: true,
+        expiresAt: null,
+      });
+      const sink = makeSink();
+      const service = new DefaultUrlService(repo, cache, sink);
+
+      await service.getByShortCode('aB3xK9q');
+      await flushAsync();
+
+      expect(sink.record).toHaveBeenCalledTimes(1);
+      const event = sink.record.mock.calls[0][0];
+      expect(event.urlId).toBe(9n);
+      expect(event.eventId).toMatch(UUID);
+      expect(event.occurredAt).toBeInstanceOf(Date);
+      expect(repo.incrementClickCount).toHaveBeenCalledWith(9n);
+    });
+
+    it('records a click on a cache miss, attributed via the row id', async () => {
+      const cache = makeCache(null);
+      const sink = makeSink();
+      repo.findByShortCode.mockResolvedValue(makeUrl({ id: 42n }));
+      const service = new DefaultUrlService(repo, cache, sink);
+
+      await service.getByShortCode('aB3xK9q');
+      await flushAsync();
+
+      expect(sink.record).toHaveBeenCalledTimes(1);
+      expect(sink.record.mock.calls[0][0].urlId).toBe(42n);
+      expect(repo.incrementClickCount).toHaveBeenCalledWith(42n);
+    });
+
+    it('emits distinct eventIds for successive redirects', async () => {
+      const cache = makeCache({
+        id: 9n,
+        originalUrl: 'https://example.com/',
+        isActive: true,
+        expiresAt: null,
+      });
+      const sink = makeSink();
+      const service = new DefaultUrlService(repo, cache, sink);
+
+      await service.getByShortCode('aB3xK9q');
+      await service.getByShortCode('aB3xK9q');
+      await flushAsync();
+
+      const [first, second] = sink.record.mock.calls.map((call) => call[0].eventId);
+      expect(first).not.toBe(second);
+    });
+
+    it('never records for a missing link', async () => {
+      const sink = makeSink();
+      repo.findByShortCode.mockResolvedValue(null);
+      const service = new DefaultUrlService(repo, makeCache(null), sink);
+
+      await expect(service.getByShortCode('nope123')).rejects.toThrow(UrlNotFoundError);
+      await flushAsync();
+      expect(sink.record).not.toHaveBeenCalled();
+      expect(repo.incrementClickCount).not.toHaveBeenCalled();
+    });
+
+    it('never records for an expired link (cached or from the database)', async () => {
+      const expired = { expiresAt: new Date(Date.now() - 1000) };
+      const sink = makeSink();
+
+      const cachedService = new DefaultUrlService(
+        repo,
+        makeCache({ id: 9n, originalUrl: 'https://x.com/', isActive: true, ...expired }),
+        sink,
+      );
+      await expect(cachedService.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+
+      repo.findByShortCode.mockResolvedValue(makeUrl(expired));
+      const missService = new DefaultUrlService(repo, makeCache(null), sink);
+      await expect(missService.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+
+      await flushAsync();
+      expect(sink.record).not.toHaveBeenCalled();
+      expect(repo.incrementClickCount).not.toHaveBeenCalled();
+    });
+
+    it('never records for an inactive link', async () => {
+      const sink = makeSink();
+      repo.findByShortCode.mockResolvedValue(makeUrl({ isActive: false }));
+      const service = new DefaultUrlService(repo, makeCache(null), sink);
+
+      await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+      await flushAsync();
+      expect(sink.record).not.toHaveBeenCalled();
+      expect(repo.incrementClickCount).not.toHaveBeenCalled();
+    });
+
+    it('redirects survive a failing sink (counter still increments)', async () => {
+      const sink = { record: vi.fn().mockRejectedValue(new Error('sink down')) };
+      const url = makeUrl();
+      repo.findByShortCode.mockResolvedValue(url);
+      const service = new DefaultUrlService(repo, makeCache(null), sink);
+
+      await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
+      await flushAsync();
+      expect(repo.incrementClickCount).toHaveBeenCalledWith(url.id);
+    });
+
+    it('redirects survive a failing counter (event still recorded)', async () => {
+      const sink = makeSink();
+      const url = makeUrl();
+      repo.findByShortCode.mockResolvedValue(url);
+      repo.incrementClickCount.mockRejectedValue(new Error('lock timeout'));
+      const service = new DefaultUrlService(repo, makeCache(null), sink);
+
+      await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
+      await flushAsync();
+      expect(sink.record).toHaveBeenCalledTimes(1);
+    });
+
+    it('redirects survive both analytics writes failing', async () => {
+      const sink = { record: vi.fn().mockRejectedValue(new Error('sink down')) };
+      const url = makeUrl();
+      repo.findByShortCode.mockResolvedValue(url);
+      repo.incrementClickCount.mockRejectedValue(new Error('lock timeout'));
+      const service = new DefaultUrlService(repo, makeCache(null), sink);
+
+      await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
     });
   });
 

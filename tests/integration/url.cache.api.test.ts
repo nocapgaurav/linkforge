@@ -17,7 +17,7 @@ if (!redisClient) {
 }
 const redis = redisClient;
 
-const cacheKey = (shortCode: string) => `cache:url:v1:${shortCode}`;
+const cacheKey = (shortCode: string) => `cache:url:v2:${shortCode}`;
 const createdCodes: string[] = [];
 
 async function createLink(originalUrl: string): Promise<string> {
@@ -48,6 +48,8 @@ beforeAll(async () => {
 afterAll(async () => {
   if (createdCodes.length > 0) {
     await redis.del(...createdCodes.map(cacheKey)).catch(() => undefined);
+    // Redirects record click events now; clear children before the FK parent.
+    await prisma.clickEvent.deleteMany({ where: { url: { shortCode: { in: createdCodes } } } });
     await prisma.url.deleteMany({ where: { shortCode: { in: createdCodes } } });
   }
   await disconnectRedis();
@@ -63,7 +65,12 @@ describe('redirect cache-aside (real Redis + Postgres)', () => {
     expect(response.headers['location']).toBe('https://example.com/cache-populate');
 
     const raw = await waitForKey(cacheKey(code));
-    expect(JSON.parse(raw)).toEqual({ u: 'https://example.com/cache-populate', a: 1, e: null });
+    expect(JSON.parse(raw)).toEqual({
+      i: expect.stringMatching(/^\d+$/),
+      u: 'https://example.com/cache-populate',
+      a: 1,
+      e: null,
+    });
     const ttl = await redis.ttl(cacheKey(code));
     expect(ttl).toBeGreaterThanOrEqual(3240);
     expect(ttl).toBeLessThanOrEqual(3960);

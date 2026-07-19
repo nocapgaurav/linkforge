@@ -82,38 +82,35 @@ export const shortCodeParamsSchema = z.strictObject({
 });
 
 /**
- * GET /api/v1/urls/:shortCode/analytics query parameters (spec §7).
- * Plain (non-strict) object: unknown query keys are stripped, not rejected —
- * shared links accumulate stray tracking params and those must never 400.
- * `from` has no default here; it defaults to the link's createdAt, which
- * only the service layer knows.
+ * GET /api/v1/urls query parameters. The cursor is `<createdAtMs>_<id>` —
+ * both parts of the keyset — parsed here into typed values so the service
+ * never string-splits. Non-strict object: unknown query keys are stripped.
  */
-export const analyticsQuerySchema = z
-  .object({
-    from: isoDatetimeSchema.optional(),
-    to: isoDatetimeSchema.optional(),
-    interval: z
-      .enum(['hour', 'day', 'week', 'month'], {
-        error: 'Must be one of: hour, day, week, month.',
-      })
-      .default('day'),
-    // Query values arrive as strings, hence coerce.
-    limit: z.coerce
-      .number({ error: 'Must be a number.' })
-      .int('Must be an integer.')
-      .min(1, 'Must be at least 1.')
-      .max(100, 'Must be at most 100.')
-      .default(10),
-  })
-  .refine((query) => !query.from || !query.to || query.to.getTime() > query.from.getTime(), {
-    error: 'Must be after "from".',
-    path: ['to'],
+const CURSOR_PATTERN = /^(\d{1,15})_(\d{1,19})$/;
+
+const cursorSchema = z
+  .string()
+  .regex(CURSOR_PATTERN, 'Malformed pagination cursor.')
+  .transform((raw) => {
+    const [, createdAtMs, id] = CURSOR_PATTERN.exec(raw) as RegExpExecArray;
+    return { createdAt: new Date(Number(createdAtMs)), id: BigInt(id) };
   });
+
+export const listUrlsQuerySchema = z.object({
+  // Query values arrive as strings, hence coerce.
+  limit: z.coerce
+    .number({ error: 'Must be a number.' })
+    .int('Must be an integer.')
+    .min(1, 'Must be at least 1.')
+    .max(100, 'Must be at most 100.')
+    .default(20),
+  cursor: cursorSchema.optional(),
+});
 
 /** Inferred types — what the service layer receives after validation. */
 export type CreateUrlBody = z.output<typeof createUrlBodySchema>;
 export type ShortCodeParams = z.output<typeof shortCodeParamsSchema>;
-export type AnalyticsQuery = z.output<typeof analyticsQuerySchema>;
+export type ListUrlsQuery = z.output<typeof listUrlsQuerySchema>;
 
 /** Validate the POST /api/v1/urls request body. */
 export function validateCreateUrlBody(input: unknown): ValidationResult<CreateUrlBody> {
@@ -125,7 +122,7 @@ export function validateShortCodeParams(input: unknown): ValidationResult<ShortC
   return validateParams(shortCodeParamsSchema, input);
 }
 
-/** Validate analytics query parameters (endpoint ships post-v1; spec §7). */
-export function validateAnalyticsQuery(input: unknown): ValidationResult<AnalyticsQuery> {
-  return validateQuery(analyticsQuerySchema, input);
+/** Validate GET /api/v1/urls query parameters. */
+export function validateListUrlsQuery(input: unknown): ValidationResult<ListUrlsQuery> {
+  return validateQuery(listUrlsQuerySchema, input);
 }

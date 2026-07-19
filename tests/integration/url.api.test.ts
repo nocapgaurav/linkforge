@@ -22,6 +22,8 @@ async function createLink(body: Record<string, unknown>) {
 }
 
 afterAll(async () => {
+  // Redirects record click events now; clear children before the FK parent.
+  await prisma.clickEvent.deleteMany({ where: { url: { shortCode: { in: createdCodes } } } });
   await prisma.url.deleteMany({ where: { shortCode: { in: createdCodes } } });
   await disconnectRedis();
   await disconnectPrisma();

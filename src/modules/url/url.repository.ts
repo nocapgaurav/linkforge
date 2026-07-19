@@ -36,6 +36,15 @@ export interface UrlRepository {
   findById(id: bigint): Promise<Url | null>;
 
   /**
+   * Keyset-paginated listing of live rows, newest first
+   * (created_at DESC, id DESC — id breaks same-millisecond ties). `before`
+   * is the exclusive keyset position; rows strictly after it in sort order
+   * are returned. Soft-deleted rows are excluded. Returns exactly the rows
+   * asked for — page-size math (hasMore, cursors) is the caller's concern.
+   */
+  list(options: { limit: number; before?: { createdAt: Date; id: bigint } }): Promise<Url[]>;
+
+  /**
    * Apply a partial update to a live URL row and return the updated row,
    * or null if the row does not exist or is soft-deleted.
    */
@@ -94,6 +103,27 @@ export class PrismaUrlRepository implements UrlRepository {
 
   findById(id: bigint): Promise<Url | null> {
     return this.db.url.findFirst({ where: { id, ...notDeleted } });
+  }
+
+  list(options: { limit: number; before?: { createdAt: Date; id: bigint } }): Promise<Url[]> {
+    const { limit, before } = options;
+    return this.db.url.findMany({
+      where: {
+        ...notDeleted,
+        // Keyset predicate: (created_at, id) < (before.createdAt, before.id)
+        // in DESC order — strictly older, or same instant with a smaller id.
+        ...(before
+          ? {
+              OR: [
+                { createdAt: { lt: before.createdAt } },
+                { createdAt: before.createdAt, id: { lt: before.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+    });
   }
 
   async update(id: bigint, input: UpdateUrlInput): Promise<Url | null> {

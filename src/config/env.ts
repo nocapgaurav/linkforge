@@ -16,6 +16,10 @@ export const env = {
   databaseUrl: required('DATABASE_URL'),
   /** Optional: absent means "run without Redis" (NullRedirectCache). */
   redisUrl: process.env.REDIS_URL,
+  /** Opt-in: anything but "true" means analytics is off (NullClickSink). */
+  analyticsEnabled: process.env.ANALYTICS_ENABLED === 'true',
+  /** Optional: browser origin allowed to call the API (CORS). Unset = no CORS headers. */
+  frontendOrigin: process.env.FRONTEND_ORIGIN,
   /**
    * Public origin short links are served from; used to build shortUrl.
    * Named PUBLIC_BASE_URL because plain BASE_URL is a reserved Vite/Vitest

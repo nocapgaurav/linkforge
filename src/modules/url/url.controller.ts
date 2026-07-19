@@ -6,7 +6,11 @@ import { created, deleted, success } from '../../shared/http/response.js';
 import { UrlNotFoundError } from './url.errors.js';
 import { urlService, type UrlService } from './url.service.js';
 import type { Url } from './url.types.js';
-import { validateCreateUrlBody, validateShortCodeParams } from './url.validation.js';
+import {
+  validateCreateUrlBody,
+  validateListUrlsQuery,
+  validateShortCodeParams,
+} from './url.validation.js';
 
 /**
  * Map a domain Url to the public API resource (api-v1-spec.md §1.6).
@@ -29,6 +33,7 @@ function toUrlResource(url: Url) {
 
 export interface UrlController {
   createUrl: RequestHandler;
+  listUrls: RequestHandler;
   redirectToOriginalUrl: RequestHandler;
   getUrlMetadata: RequestHandler;
   deleteUrl: RequestHandler;
@@ -43,6 +48,17 @@ export function createUrlController(service: UrlService): UrlController {
       if (!body.success) throw new RequestValidationError(body);
       const url = await service.create(body.data);
       created(res, toUrlResource(url), `/api/v1/urls/${url.shortCode}`);
+    }),
+
+    /** GET /api/v1/urls */
+    listUrls: asyncHandler(async (req, res) => {
+      const query = validateListUrlsQuery(req.query);
+      if (!query.success) throw new RequestValidationError(query);
+      const page = await service.list(query.data);
+      success(res, {
+        items: page.items.map(toUrlResource),
+        pagination: { nextCursor: page.nextCursor, hasMore: page.hasMore },
+      });
     }),
 
     /** GET /:shortCode */

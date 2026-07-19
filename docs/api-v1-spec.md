@@ -1,8 +1,10 @@
 # LinkForge Public REST API — Version 1 Specification
 
-Status: Approved contract, not yet implemented. This document is the source of
-truth for the v1 HTTP layer. Frontend and backend teams can build against it
-independently. Companion documents: `url-entity-design.md` (storage model).
+Status: Implemented (all sections including §7 analytics as of 2026-07-19).
+This document is the source of truth for the v1 HTTP layer. Frontend and
+backend teams can build against it independently. Companion documents:
+`url-entity-design.md` (storage model), `analytics-design.md` (analytics
+system design).
 
 ---
 
@@ -294,36 +296,55 @@ never renamed or repurposed.
 | `RATE_LIMITED` | 429 | Reserved: request quota exceeded |
 | `UNAUTHORIZED` | 401 | Reserved: missing/invalid credentials |
 | `FORBIDDEN` | 403 | Reserved: authenticated but not allowed |
-| `NOT_IMPLEMENTED` | 501 | Endpoint specified but not yet live (analytics in v1) |
+| `NOT_IMPLEMENTED` | 501 | Reserved: endpoint specified but not yet live (none currently) |
 | `INTERNAL_ERROR` | 500 | Unexpected server failure; safe generic message |
 
 ---
 
-## 7. `GET /api/v1/urls/:shortCode/analytics` — Link analytics (design only)
+## 7. `GET /api/v1/urls/:shortCode/analytics` — Link analytics
 
-**Not implemented in v1.** If deployed as a stub it returns
-`501 NOT_IMPLEMENTED`. The contract is fixed now so shipping it later is
-purely additive.
+**Implemented** (2026-07-19). This contract supersedes the pre-implementation
+draft that previously occupied this section — the endpoint had never shipped,
+so the revision is not a breaking change. Changes from the draft: `hour`
+interval and `limit` dropped; breakdowns are flat named-field lists instead
+of `{value,label,clicks,percentage}`; a fixed-window `summary` block was
+added; defaults and a maximum range were pinned down.
 
-**Purpose**: Aggregated click analytics for one link.
+**Purpose**: Aggregated click analytics for one link. Aggregates only —
+individual events are never exposed (privacy posture; see
+`analytics-design.md`).
 
 **Method / Route**: `GET /api/v1/urls/:shortCode/analytics`
-(sub-resource of the link — leaves room for sibling sub-resources like
-`/qr` without restructuring).
 
-**Request headers**: `Authorization` — analytics WILL require authentication
-when it ships (click data is sensitive); unauthenticated calls get `401`.
+**Request headers**: none required. **Known v1 gap** (same class as DELETE):
+until authentication ships, anyone who knows a short code can read its
+analytics; the endpoint becomes owner-scoped when auth lands, with no
+contract change.
 
-**Path parameters**: `shortCode` — same shape rules as §3.
+**Path parameters**: `shortCode` — same shape rules as §3; `404` for
+unknown **or soft-deleted** links (management plane hides tombstones).
 
 **Query parameters**:
 
 | Param | Type | Default | Rules |
 |---|---|---|---|
-| `from` | ISO 8601 | link `createdAt` | Start of window, inclusive |
+| `from` | ISO 8601 | `to` − 30 days | Start of window, inclusive |
 | `to` | ISO 8601 | now | End of window, exclusive; must be > `from` |
-| `interval` | enum | `day` | `hour` \| `day` \| `week` \| `month` — bucket size for `timeSeries` |
-| `limit` | int | 10 | 1–100; max entries per breakdown list |
+| `interval` | enum | `day` | `day` \| `week` \| `month` — bucket size for `series` |
+
+The window (`to` − `from`) must not exceed **365 days** → otherwise
+`400 VALIDATION_ERROR`. Unknown query keys are ignored.
+
+**Window semantics**: `series` and all breakdowns are scoped to
+`[from, to)`. `summary` uses **fixed windows independent of the query
+range** (all-time, since UTC midnight, trailing 7/30 days) so the headline
+numbers are stable regardless of filtering.
+
+**Example request**:
+
+```
+GET /api/v1/urls/aB3xK9q/analytics?from=2026-07-01T00:00:00Z&to=2026-07-19T00:00:00Z&interval=day
+```
 
 **Success response**: `200 OK`
 
@@ -331,61 +352,47 @@ when it ships (click data is sensitive); unauthenticated calls get `401`.
 {
   "success": true,
   "data": {
-    "shortCode": "aB3xK9q",
-    "range": {
-      "from": "2026-06-19T00:00:00.000Z",
-      "to": "2026-07-19T00:00:00.000Z",
-      "interval": "day"
+    "summary": {
+      "totalClicks": 1234,
+      "today": 41,
+      "last7Days": 310,
+      "last30Days": 990
     },
-    "totals": {
-      "clicks": 1234
-    },
-    "firstClickAt": "2026-06-20T08:12:44.000Z",
-    "lastClickAt": "2026-07-18T22:03:10.000Z",
-    "timeSeries": [
-      { "timestamp": "2026-06-19T00:00:00.000Z", "clicks": 41 },
-      { "timestamp": "2026-06-20T00:00:00.000Z", "clicks": 87 }
+    "series": [
+      { "date": "2026-07-01", "count": 41 },
+      { "date": "2026-07-02", "count": 0 },
+      { "date": "2026-07-03", "count": 87 }
     ],
-    "breakdowns": {
-      "countries":        [ { "value": "US", "label": "United States", "clicks": 640, "percentage": 51.9 } ],
-      "cities":           [ { "value": "US-SEA", "label": "Seattle, US", "clicks": 120, "percentage": 9.7 } ],
-      "browsers":         [ { "value": "chrome", "label": "Chrome", "clicks": 800, "percentage": 64.8 } ],
-      "operatingSystems": [ { "value": "ios", "label": "iOS", "clicks": 500, "percentage": 40.5 } ],
-      "devices":          [ { "value": "mobile", "label": "Mobile", "clicks": 700, "percentage": 56.7 } ],
-      "referrers":        [ { "value": "twitter.com", "label": "twitter.com", "clicks": 300, "percentage": 24.3 } ]
-    }
+    "browsers":  [ { "browser": "chrome", "count": 800 } ],
+    "devices":   [ { "device": "mobile", "count": 700 } ],
+    "countries": [ { "country": "US", "count": 640 } ],
+    "referrers": [ { "referrerHost": "t.co", "count": 300 } ]
   }
 }
 ```
 
-Contract properties that make future evolution non-breaking:
+Contract properties:
 
-- **Every breakdown shares one item shape**: `{ value, label, clicks,
-  percentage }`. `value` is the stable machine key (ISO country code, OS
-  slug); `label` is display text. New dimensions (e.g. `languages`,
-  `utmSources`) are added as new keys under `breakdowns` without touching
-  existing ones.
-- `totals` is an object, not a bare number, so `uniqueVisitors`,
-  `scans` (QR), etc. can be added later.
-- `firstClickAt` / `lastClickAt` are `null` for a link with no clicks;
-  `timeSeries` is `[]`; breakdown lists are `[]`.
-- `timeSeries` buckets are aligned to the start of each `interval` in UTC;
-  empty buckets are included with `clicks: 0` so charts need no gap-filling.
-- Breakdown lists are sorted by `clicks` descending, truncated to `limit`.
-  Truncation is observable via `totals.clicks` vs the list sum — no hidden
-  "other" row is required, but an `other` entry MAY be appended later as an
-  additive change.
+- `series` buckets are aligned to the start of each `interval` in **UTC**
+  (`week` starts ISO Monday, `month` on the 1st); `date` is the bucket
+  start as `YYYY-MM-DD`. Empty buckets are included with `count: 0` —
+  charts need no gap-filling.
+- Breakdown lists are sorted by `count` descending, capped at **10**
+  entries, and exclude events where the dimension is unknown (NULL) —
+  e.g. direct visits do not appear under `referrers`.
+- Enrichment (GeoIP, user-agent parsing) is not yet live, so breakdowns
+  reflect only events that carry those dimensions; series and summary
+  count every click.
+- A link with no clicks returns zeroed `summary`, a fully zero-filled
+  `series`, and empty breakdown lists.
 
 **Error responses**:
 
 | Status | `error.code` | When |
 |---|---|---|
-| 400 | `VALIDATION_ERROR` | Bad `from`/`to`/`interval`/`limit` |
-| 401 | `UNAUTHORIZED` | Missing/invalid credentials (once live) |
-| 404 | `NOT_FOUND` | No live link with that code (or not owned by caller) |
-| 501 | `NOT_IMPLEMENTED` | v1 stub behavior |
-
----
+| 400 | `VALIDATION_ERROR` | Bad `from`/`to`/`interval`, `to` ≤ `from`, or range > 365 days |
+| 404 | `NOT_FOUND` | No live link with that code |
+| 500 | `INTERNAL_ERROR` | Unexpected failure |
 
 ## 8. Forward-compatibility design notes
 
@@ -411,9 +418,81 @@ How each planned feature lands without breaking v1 clients:
 - **Link updates**: `PATCH /api/v1/urls/:shortCode` is the reserved route
   (repository `update()` already supports it); not part of v1's public
   surface.
-- **Listing**: `GET /api/v1/urls` reserved for authenticated listing with
-  cursor pagination (`cursor`, `limit` query params; envelope gains a `meta`
-  key). Defined here so pagination style is settled before it ships.
+- **Listing**: shipped — see §9. (Pagination landed inside `data` as a
+  `pagination` key rather than the once-sketched envelope-level `meta`; the
+  envelope stays untouched.) Becomes owner-scoped when auth lands.
 - **Versioning discipline**: within `v1`, changes are additive-only — new
   endpoints, new optional request fields, new response fields, new error
   codes. Anything else is `v2`.
+
+---
+
+## 9. `GET /api/v1/urls` — List links
+
+**Implemented** (2026-07-19).
+
+**Purpose**: Newest-first listing of live (non-deleted) links with cursor
+pagination, for the dashboard.
+
+> **Public demo limitation**: LinkForge has no authentication yet, so this
+> endpoint lists **every** link in the deployment — the same accepted-gap
+> class as unauthenticated DELETE (§5), but broader, since it exposes
+> original URLs without knowing any code. Acceptable for local/demo use
+> only; do not expose a public deployment with this endpoint enabled. When
+> auth ships the route is unchanged and results simply become owner-scoped.
+
+**Method / Route**: `GET /api/v1/urls`
+
+**Query parameters**:
+
+| Param | Type | Default | Rules |
+|---|---|---|---|
+| `limit` | int | 20 | 1–100; page size |
+| `cursor` | string | — | Opaque keyset cursor from a previous page's `pagination.nextCursor` |
+
+**Cursor format**: `<createdAtMs>_<id>` — the epoch-millisecond `createdAt`
+and internal id of the last row of the previous page. Treat it as opaque:
+the format may change; only ever pass back a `nextCursor` the API returned.
+Malformed cursors → `400 VALIDATION_ERROR`.
+
+**Pagination semantics**: keyset (a.k.a. cursor) pagination over
+`ORDER BY created_at DESC, id DESC`. A page contains rows strictly *after*
+the cursor position in that order; `hasMore` is computed by over-fetching
+one row. Pages are stable under concurrent inserts (new links prepend
+before your cursor; they never shift or duplicate rows in subsequent
+pages). A cursor pointing past the oldest row yields an empty page with
+`hasMore: false` — not an error.
+
+**Success response**: `200 OK`
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [ { "…": "URL resource (§1.6)" } ],
+    "pagination": {
+      "nextCursor": "1753000000000_42",
+      "hasMore": true
+    }
+  }
+}
+```
+
+`nextCursor` is `null` on the last page. Soft-deleted links never appear.
+
+**Error responses**:
+
+| Status | `error.code` | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | `limit` out of range/non-integer, malformed `cursor` |
+| 500 | `INTERNAL_ERROR` | Unexpected failure |
+
+## 10. CORS
+
+Cross-origin browser access is opt-in per deployment via the
+`FRONTEND_ORIGIN` environment variable (exactly one origin; never
+hardcoded). When set, responses to that origin carry
+`Access-Control-Allow-Origin` (+ `Vary: Origin`), and `OPTIONS` preflights
+answer `204` allowing `GET,POST,DELETE` with `Content-Type`. When unset,
+no CORS headers are emitted and browsers cannot call the API cross-origin —
+the pre-CORS behavior.

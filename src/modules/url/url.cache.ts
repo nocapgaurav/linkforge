@@ -14,6 +14,8 @@ import { redisClient } from '../../config/redis.js';
 
 /** The subset of a Url that the redirect decision needs. */
 export interface CachedRedirect {
+  /** Internal link id, carried so cache hits can attribute click events. */
+  id: bigint;
   originalUrl: string;
   isActive: boolean;
   expiresAt: Date | null;
@@ -62,14 +64,17 @@ export interface RedisCommands {
   del(key: string): Promise<unknown>;
 }
 
-const KEY_PREFIX = 'cache:url:v1:';
+// v2: payload gained `i` (link id) when analytics landed — bumping the key
+// version instead of migrating entries; v1 keys simply age out via TTL.
+const KEY_PREFIX = 'cache:url:v2:';
 const POSITIVE_TTL_SECONDS = 3600;
 const TTL_JITTER_RATIO = 0.1;
 const NEGATIVE_TTL_SECONDS = 60;
 const NEGATIVE_SENTINEL = '0';
 
-/** Compact wire format: {u: originalUrl, a: isActive 0|1, e: epochMs|null}. */
+/** Compact wire format: {i: id, u: originalUrl, a: isActive 0|1, e: epochMs|null}. */
 interface WireEntry {
+  i: string;
   u: string;
   a: 0 | 1;
   e: number | null;
@@ -101,7 +106,11 @@ export class RedisRedirectCache implements RedirectCache {
     if (raw === NEGATIVE_SENTINEL) return 'negative';
     try {
       const entry = JSON.parse(raw) as WireEntry;
+      if (typeof entry.i !== 'string' || typeof entry.u !== 'string') {
+        return null;
+      }
       return {
+        id: BigInt(entry.i),
         originalUrl: entry.u,
         isActive: entry.a === 1,
         expiresAt: entry.e === null ? null : new Date(entry.e),
@@ -114,6 +123,7 @@ export class RedisRedirectCache implements RedirectCache {
 
   async set(shortCode: string, value: CachedRedirect): Promise<void> {
     const entry: WireEntry = {
+      i: value.id.toString(),
       u: value.originalUrl,
       a: value.isActive ? 1 : 0,
       e: value.expiresAt === null ? null : value.expiresAt.getTime(),

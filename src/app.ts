@@ -1,7 +1,9 @@
 import express from 'express';
 
+import { env } from './config/env.js';
 import { apiRouter, healthRouter } from './routes/index.js';
 import { redirectRouter } from './modules/url/url.routes.js';
+import { corsMiddleware } from './shared/http/cors.js';
 import { errorHandler } from './shared/http/error-handler.js';
 import { notFoundHandler } from './shared/http/not-found.js';
 import { requestId } from './shared/http/request-id.js';
@@ -18,6 +20,8 @@ app.disable('x-powered-by');
 // root-level redirect catch-all — so /api/... is never read as a short code.
 app.use(requestId);
 app.use(requestLogger);
+// CORS before the parser so preflights short-circuit without body parsing.
+app.use(corsMiddleware(env.frontendOrigin));
 app.use(express.json());
 
 app.use(healthRouter);

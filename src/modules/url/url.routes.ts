@@ -8,6 +8,7 @@ import { urlController } from './url.controller.js';
 export const urlRouter = Router();
 
 urlRouter.post('/', urlController.createUrl);
+urlRouter.get('/', urlController.listUrls);
 urlRouter.get('/:shortCode', urlController.getUrlMetadata);
 urlRouter.delete('/:shortCode', urlController.deleteUrl);
 

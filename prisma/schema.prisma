@@ -32,8 +32,43 @@ model Url {
   // Soft delete: codes are tombstoned, never recycled.
   deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
 
+  clickEvents ClickEvent[]
+
   @@index([urlHash])
   @@index([expiresAt])
   @@index([createdBy, createdAt(sort: Desc)])
   @@map("urls")
+}
+
+// Append-only click event log (docs/analytics-design.md §3). Rows are
+// facts: never updated, never individually deleted (retention drops by
+// age). Enrichment fields are nullable — Phase 1 persists whatever the
+// caller provides; GeoIP/UA enrichment arrives in a later phase.
+model ClickEvent {
+  id             BigInt   @id @default(autoincrement())
+  // Idempotency key minted at redirect time: replays and retries are
+  // deduplicated by this unique index (at-least-once → exactly-once effects).
+  eventId        String   @unique @map("event_id") @db.Uuid
+  urlId          BigInt   @map("url_id")
+  // Event time (stamped by the app at redirect), NOT insert time.
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(6)
+  // Salted+truncated hash; nullable until enrichment ships (design says
+  // NOT NULL eventually — tightened when the enricher lands).
+  ipHash         Bytes?   @map("ip_hash")
+  country        String?  @db.Char(2)
+  city           String?  @db.VarChar(80)
+  browser        String?  @db.VarChar(32)
+  browserVersion String?  @map("browser_version") @db.VarChar(16)
+  os             String?  @db.VarChar(32)
+  device         String?  @db.VarChar(32)
+  referrerHost   String?  @map("referrer_host") @db.VarChar(255)
+  requestId      String?  @map("request_id") @db.Uuid
+
+  // Restrict is free (urls are soft-deleted, rows never vanish) and makes
+  // orphan events impossible.
+  url Url @relation(fields: [urlId], references: [id], onDelete: Restrict)
+
+  // The one query shape analytics uses: events for a link within a range.
+  @@index([urlId, occurredAt(sort: Desc)])
+  @@map("click_events")
 }

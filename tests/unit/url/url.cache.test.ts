@@ -6,9 +6,10 @@ import {
   type RedisCommands,
 } from '../../../src/modules/url/url.cache';
 
-const KEY = 'cache:url:v1:aB3xK9q';
+const KEY = 'cache:url:v2:aB3xK9q';
 
 const entry: CachedRedirect = {
+  id: 1n,
   originalUrl: 'https://example.com/',
   isActive: true,
   expiresAt: null,
@@ -44,22 +45,33 @@ describe('RedisRedirectCache', () => {
 
   describe('get', () => {
     it('parses a positive entry back into a CachedRedirect', async () => {
-      redis.get.mockResolvedValue(JSON.stringify({ u: 'https://example.com/', a: 1, e: null }));
+      redis.get.mockResolvedValue(
+        JSON.stringify({ i: '1', u: 'https://example.com/', a: 1, e: null }),
+      );
 
       await expect(cache.get('aB3xK9q')).resolves.toEqual(entry);
       expect(redis.get).toHaveBeenCalledWith(KEY);
     });
 
-    it('revives expiresAt epoch millis as a Date and isActive 0 as false', async () => {
+    it('revives id and expiresAt epoch millis, and isActive 0 as false', async () => {
       const epoch = Date.UTC(2030, 0, 1);
-      redis.get.mockResolvedValue(JSON.stringify({ u: 'https://x.com/', a: 0, e: epoch }));
+      redis.get.mockResolvedValue(
+        JSON.stringify({ i: '7', u: 'https://x.com/', a: 0, e: epoch }),
+      );
 
       const result = await cache.get('aB3xK9q');
       expect(result).toEqual({
+        id: 7n,
         originalUrl: 'https://x.com/',
         isActive: false,
         expiresAt: new Date(epoch),
       });
+    });
+
+    it('treats a pre-analytics (v1-shaped) payload without id as a miss', async () => {
+      redis.get.mockResolvedValue(JSON.stringify({ u: 'https://x.com/', a: 1, e: null }));
+
+      await expect(cache.get('aB3xK9q')).resolves.toBeNull();
     });
 
     it("returns 'negative' for the negative sentinel", async () => {
@@ -98,6 +110,7 @@ describe('RedisRedirectCache', () => {
       const [key, value, mode, ttl] = redis.set.mock.calls[0];
       expect(key).toBe(KEY);
       expect(JSON.parse(value)).toEqual({
+        i: '1',
         u: 'https://example.com/',
         a: 1,
         e: expiresAt.getTime(),
