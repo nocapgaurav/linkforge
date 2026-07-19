@@ -1,6 +1,7 @@
 import app from './app.js';
 import { env } from './config/env.js';
 import { disconnectPrisma } from './config/prisma.js';
+import { disconnectRedis } from './config/redis.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -34,6 +35,7 @@ function shutdown(signal: NodeJS.Signals): void {
     void (async () => {
       try {
         await disconnectPrisma();
+        await disconnectRedis();
         if (closeError) throw closeError;
         console.log(JSON.stringify({ level: 'info', event: 'shutdown_complete' }));
         process.exit(0);

@@ -14,6 +14,8 @@ export const env = {
   port: Number(process.env.PORT ?? DEFAULT_PORT),
   nodeEnv: process.env.NODE_ENV ?? 'development',
   databaseUrl: required('DATABASE_URL'),
+  /** Optional: absent means "run without Redis" (NullRedirectCache). */
+  redisUrl: process.env.REDIS_URL,
   /**
    * Public origin short links are served from; used to build shortUrl.
    * Named PUBLIC_BASE_URL because plain BASE_URL is a reserved Vite/Vitest

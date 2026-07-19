@@ -17,5 +17,21 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: linkforge-redis
+    restart: unless-stopped
+    # Pure cache: bounded memory with LRU eviction, no persistence volume —
+    # Postgres owns the truth and the cache is rebuilt on demand.
+    command:
+      ['redis-server', '--maxmemory', '128mb', '--maxmemory-policy', 'allkeys-lru', '--save', '']
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   linkforge_pgdata:

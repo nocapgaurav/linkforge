@@ -4,13 +4,9 @@ import { asyncHandler } from '../../shared/http/async-handler.js';
 import { RequestValidationError } from '../../shared/http/error-handler.js';
 import { created, deleted, success } from '../../shared/http/response.js';
 import { UrlNotFoundError } from './url.errors.js';
-import { urlService } from './url.service.js';
-import type { UrlService } from './url.service.interface.js';
+import { urlService, type UrlService } from './url.service.js';
 import type { Url } from './url.types.js';
-import {
-  validateCreateUrlBody,
-  validateShortCodeParams,
-} from './validation/url.validation.js';
+import { validateCreateUrlBody, validateShortCodeParams } from './url.validation.js';
 
 /**
  * Map a domain Url to the public API resource (api-v1-spec.md §1.6).

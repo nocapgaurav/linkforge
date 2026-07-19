@@ -1,14 +1,18 @@
 import { createHash, randomInt } from 'node:crypto';
-import { urlRepository } from './url.repository.js';
-import type { UrlRepository } from './url.repository.interface.js';
-import type { UrlService } from './url.service.interface.js';
+import { urlRepository, type UrlRepository } from './url.repository.js';
+import {
+  NullRedirectCache,
+  redirectCache,
+  type CachedRedirect,
+  type RedirectCache,
+} from './url.cache.js';
 import {
   AliasAlreadyExistsError,
   ShortCodeGenerationError,
   UrlNotFoundError,
 } from './url.errors.js';
 import { ShortCodeConflictError, type Url } from './url.types.js';
-import type { CreateUrlBody } from './validation/url.schema.js';
+import type { CreateUrlBody } from './url.validation.js';
 
 const BASE62_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
@@ -36,11 +40,62 @@ function computeUrlHash(normalizedUrl: string): string {
 }
 
 /**
+ * Business-logic contract for URL management. HTTP-agnostic: methods accept
+ * already-validated input and return domain objects; failures are thrown as
+ * domain errors from url.errors.ts.
+ */
+export interface UrlService {
+  /**
+   * Create a short link. Normalizes the original URL, computes its SHA-256
+   * hash, and persists with either the caller's custom alias or a freshly
+   * generated base62 code (retrying on the rare collision). Purges any
+   * negative cache entry left by pre-creation lookups of the code.
+   * Throws AliasAlreadyExistsError if the requested alias is taken,
+   * ShortCodeGenerationError if generation exhausts its retry budget.
+   */
+  create(input: CreateUrlBody): Promise<Url>;
+
+  /**
+   * Resolve a short code for redirecting — the strict visibility rules,
+   * served cache-aside (docs/redis-cache-design.md). Returns the redirect
+   * view (a full domain Url on cache misses, the cached view on hits) only
+   * when the link exists, is not soft-deleted, is active, and is not
+   * expired; otherwise throws UrlNotFoundError. Rules are re-evaluated on
+   * every cache hit, so expiry and deactivation are never served stale.
+   * Never reveals WHY a code is dead.
+   */
+  getByShortCode(shortCode: string): Promise<CachedRedirect>;
+
+  /**
+   * Management-plane read. Inactive and expired URLs ARE returned (owners
+   * see the truth); only missing/soft-deleted codes throw UrlNotFoundError.
+   * Never cached: metadata must show fresh state (including clickCount).
+   */
+  getMetadata(shortCode: string): Promise<Url>;
+
+  /**
+   * Soft-delete a URL and return the tombstone timestamp. The short code is
+   * retired permanently, and its cache entry is invalidated after the
+   * database commit. Throws UrlNotFoundError if no live URL has the code.
+   */
+  delete(shortCode: string): Promise<Date>;
+}
+
+/**
  * Business logic for URL management. Persistence goes through the injected
- * UrlRepository interface — this class never touches Prisma or HTTP.
+ * UrlRepository, redirect caching through the injected RedirectCache —
+ * this class never touches Prisma, Redis, or HTTP. The cache defaults to
+ * the no-op implementation so the cache is strictly opt-in.
+ *
+ * Every cache interaction is additionally guarded here: even a cache
+ * implementation that violates the never-throws contract cannot break a
+ * request (fail-open, defense in depth).
  */
 export class DefaultUrlService implements UrlService {
-  constructor(private readonly urls: UrlRepository) {}
+  constructor(
+    private readonly urls: UrlRepository,
+    private readonly cache: RedirectCache = new NullRedirectCache(),
+  ) {}
 
   async create(input: CreateUrlBody): Promise<Url> {
     const originalUrl = normalizeOriginalUrl(input.originalUrl);
@@ -52,13 +107,14 @@ export class DefaultUrlService implements UrlService {
       // covers tombstoned codes that finds cannot see. Attempting the insert
       // and translating the conflict is the only race-free check.
       try {
-        return await this.urls.create({
+        const url = await this.urls.create({
           shortCode: input.customAlias,
           isCustomAlias: true,
           originalUrl,
           urlHash,
           expiresAt,
         });
+        return await this.finishCreate(url);
       } catch (error) {
         if (error instanceof ShortCodeConflictError) {
           throw new AliasAlreadyExistsError(input.customAlias);
@@ -70,13 +126,14 @@ export class DefaultUrlService implements UrlService {
     for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
       const shortCode = this.generateShortCode();
       try {
-        return await this.urls.create({
+        const url = await this.urls.create({
           shortCode,
           isCustomAlias: false,
           originalUrl,
           urlHash,
           expiresAt,
         });
+        return await this.finishCreate(url);
       } catch (error) {
         if (error instanceof ShortCodeConflictError) {
           continue;
@@ -87,13 +144,40 @@ export class DefaultUrlService implements UrlService {
     throw new ShortCodeGenerationError(MAX_GENERATION_ATTEMPTS);
   }
 
-  async getByShortCode(shortCode: string): Promise<Url> {
-    const url = await this.urls.findByShortCode(shortCode);
-    if (!url || !this.isRedirectable(url)) {
-      // One error for every dead state — the redirect plane never explains
-      // whether a code is missing, deleted, disabled, or expired (spec §3).
+  async getByShortCode(shortCode: string): Promise<CachedRedirect> {
+    const cached = await this.cacheGet(shortCode);
+
+    if (cached === 'negative') {
+      // Cached 404: we recently confirmed this code does not resolve.
       throw new UrlNotFoundError(shortCode);
     }
+    if (cached !== null) {
+      // Positive hit: the cache stores facts, not decisions — business
+      // rules are re-evaluated so expiry/deactivation are never stale.
+      if (!this.isRedirectable(cached)) {
+        throw new UrlNotFoundError(shortCode);
+      }
+      return cached;
+    }
+
+    // Miss: Postgres is the source of truth.
+    const url = await this.urls.findByShortCode(shortCode);
+    if (!url) {
+      this.fireAndForget(() => this.cache.setNegative(shortCode));
+      throw new UrlNotFoundError(shortCode);
+    }
+    if (!this.isRedirectable(url)) {
+      // Found but dead (inactive/expired): not cached — only live links
+      // get positive entries, and a dead-but-present row is not a 404 fact.
+      throw new UrlNotFoundError(shortCode);
+    }
+    this.fireAndForget(() =>
+      this.cache.set(shortCode, {
+        originalUrl: url.originalUrl,
+        isActive: url.isActive,
+        expiresAt: url.expiresAt,
+      }),
+    );
     return url;
   }
 
@@ -115,12 +199,17 @@ export class DefaultUrlService implements UrlService {
       // The row was tombstoned between the find and the delete.
       throw new UrlNotFoundError(shortCode);
     }
+    // Invalidate AFTER the commit; awaited so the link is dead in the cache
+    // by the time the client sees the deletion response.
+    await this.invalidate(shortCode);
     return deletedAt;
   }
 
   /** Redirect rule: active and (never expires or not yet expired). */
-  private isRedirectable(url: Url): boolean {
-    return url.isActive && (url.expiresAt === null || url.expiresAt.getTime() > Date.now());
+  private isRedirectable(target: CachedRedirect): boolean {
+    return (
+      target.isActive && (target.expiresAt === null || target.expiresAt.getTime() > Date.now())
+    );
   }
 
   /** Uniform random base62 code from a CSPRNG (crypto.randomInt). */
@@ -131,7 +220,50 @@ export class DefaultUrlService implements UrlService {
     }
     return code;
   }
+
+  /**
+   * Post-insert step: purge any negative cache entry left by lookups that
+   * 404'd before this code existed. Never populates the cache — the first
+   * redirect does that (pure cache-aside).
+   */
+  private async finishCreate(url: Url): Promise<Url> {
+    await this.invalidate(url.shortCode);
+    return url;
+  }
+
+  /** Cache read with defense in depth: any cache error is a miss. */
+  private async cacheGet(shortCode: string): Promise<CachedRedirect | 'negative' | null> {
+    try {
+      return await this.cache.get(shortCode);
+    } catch {
+      // Fail-open: a broken cache degrades to a Postgres read.
+      return null;
+    }
+  }
+
+  /** Awaited best-effort invalidation used on the mutation paths. */
+  private async invalidate(shortCode: string): Promise<void> {
+    try {
+      await this.cache.del(shortCode);
+    } catch {
+      // Fail-open: the TTL is the backstop for a missed invalidation.
+    }
+  }
+
+  /**
+   * Cache population is off the critical path: the response never waits on
+   * a cache write, and write failures are swallowed (design §4).
+   */
+  private fireAndForget(write: () => Promise<void>): void {
+    void (async () => {
+      try {
+        await write();
+      } catch {
+        // Cache writes are best-effort by contract.
+      }
+    })();
+  }
 }
 
-/** Application-wide service instance wired to the Prisma-backed repository. */
-export const urlService: UrlService = new DefaultUrlService(urlRepository);
+/** Application-wide service wired to the Prisma repository and the cache. */
+export const urlService: UrlService = new DefaultUrlService(urlRepository, redirectCache);

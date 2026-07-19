@@ -1,11 +1,21 @@
 import { z } from 'zod';
+import {
+  validateBody,
+  validateParams,
+  validateQuery,
+  type ValidationResult,
+} from '../../utils/validation.js';
 
 /**
- * Zod schemas for the URL module's v1 API surface (docs/api-v1-spec.md).
+ * Zod schemas and one-call validators for the URL module's v1 API surface
+ * (docs/api-v1-spec.md).
  *
  * Pure validation: no Prisma, no repository, no framework imports. Schemas
  * transform raw wire input (JSON body, path params, query strings) into
- * typed, normalized values for the service layer.
+ * typed, normalized values for the service layer. The validate* functions
+ * are the single entry point controllers use — on failure the returned
+ * `error` is already in the public API envelope shape and can be serialized
+ * as-is with a 400 status.
  */
 
 /** Short-code shape shared by generated codes and custom aliases (spec §3). */
@@ -104,3 +114,18 @@ export const analyticsQuerySchema = z
 export type CreateUrlBody = z.output<typeof createUrlBodySchema>;
 export type ShortCodeParams = z.output<typeof shortCodeParamsSchema>;
 export type AnalyticsQuery = z.output<typeof analyticsQuerySchema>;
+
+/** Validate the POST /api/v1/urls request body. */
+export function validateCreateUrlBody(input: unknown): ValidationResult<CreateUrlBody> {
+  return validateBody(createUrlBodySchema, input);
+}
+
+/** Validate :shortCode path parameters (redirect and management routes). */
+export function validateShortCodeParams(input: unknown): ValidationResult<ShortCodeParams> {
+  return validateParams(shortCodeParamsSchema, input);
+}
+
+/** Validate analytics query parameters (endpoint ships post-v1; spec §7). */
+export function validateAnalyticsQuery(input: unknown): ValidationResult<AnalyticsQuery> {
+  return validateQuery(analyticsQuerySchema, input);
+}
