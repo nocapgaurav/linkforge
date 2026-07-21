@@ -40,6 +40,20 @@ export class AliasAlreadyExistsError extends UrlDomainError {
 }
 
 /**
+ * The link requires a password and none (or the wrong one) was provided.
+ * One error for both cases so the redirect plane never reveals which —
+ * same anti-enumeration spirit as UrlNotFoundError's uniform 404.
+ */
+export class LinkPasswordRequiredError extends UrlDomainError {
+  readonly shortCode: string;
+
+  constructor(shortCode: string) {
+    super('This link requires a password.');
+    this.shortCode = shortCode;
+  }
+}
+
+/**
  * Random code generation kept colliding past the retry budget. Statistically
  * near-impossible at 62^7 unless the code space is saturated or generation
  * is broken — treated as a server fault, not a client error.

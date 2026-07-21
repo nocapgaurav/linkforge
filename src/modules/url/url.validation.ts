@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  BCRYPT_MAX_PASSWORD_BYTES,
   validateBody,
   validateParams,
   validateQuery,
@@ -61,19 +62,60 @@ const futureDatetimeSchema = isoDatetimeSchema.refine(
   'Must be in the future.',
 );
 
+/** Destination URL shape, shared by create and update (reused, not duplicated). */
+const originalUrlSchema = z
+  .string()
+  .trim()
+  .max(2048, 'Must be at most 2048 characters.')
+  .pipe(z.httpUrl('Must be a valid http(s) URL.'));
+
 /**
  * POST /api/v1/urls request body (spec §2).
  * strictObject: unknown fields are rejected to keep client typos loud.
  * expiresAt accepts null as an explicit "never expires" (spec §1.6).
  */
 export const createUrlBodySchema = z.strictObject({
-  originalUrl: z
-    .string()
-    .trim()
-    .max(2048, 'Must be at most 2048 characters.')
-    .pipe(z.httpUrl('Must be a valid http(s) URL.')),
+  originalUrl: originalUrlSchema,
   customAlias: customAliasSchema.optional(),
   expiresAt: futureDatetimeSchema.nullish(),
+});
+
+/**
+ * Link-gate password (spec: link editing, password protection). A lower
+ * bar than account passwords (auth.validation.ts's 8-char minimum) — this
+ * gates a casually-shared link, not an account, so 4 characters is a
+ * reasonable floor. Shares the bcrypt byte limit because that limit is a
+ * property of bcrypt, not of what the password protects.
+ */
+const linkPasswordSchema = z
+  .string()
+  .min(4, 'Must be at least 4 characters.')
+  .refine((value) => Buffer.byteLength(value, 'utf8') <= BCRYPT_MAX_PASSWORD_BYTES, {
+    error: `Must be at most ${BCRYPT_MAX_PASSWORD_BYTES} bytes (bcrypt limit).`,
+  });
+
+/**
+ * PATCH /api/v1/urls/:shortCode request body. Every field optional — this
+ * is a partial update. `shortCode` is deliberately absent (url.types.ts:
+ * a link's public identity is immutable once issued); `expiresAt` reuses
+ * the exact same "must be in the future" rule as create, so scheduling an
+ * expiration always means "schedule a future one" — deactivate a link
+ * immediately via `isActive: false` instead, not by back-dating expiresAt.
+ * `expiresAt`/`maxClicks`/`password` all accept explicit `null` to clear
+ * that restriction; omitting a field leaves it unchanged.
+ */
+export const updateUrlBodySchema = z.strictObject({
+  originalUrl: originalUrlSchema.optional(),
+  expiresAt: futureDatetimeSchema.nullable().optional(),
+  maxClicks: z
+    .number({ error: 'Must be a number.' })
+    .int('Must be an integer.')
+    .positive('Must be at least 1.')
+    .max(1_000_000_000, 'Must be at most 1,000,000,000.')
+    .nullable()
+    .optional(),
+  password: linkPasswordSchema.nullable().optional(),
+  isActive: z.boolean().optional(),
 });
 
 /** Path parameters for every /:shortCode and /api/v1/urls/:shortCode route. */
@@ -109,6 +151,7 @@ export const listUrlsQuerySchema = z.object({
 
 /** Inferred types — what the service layer receives after validation. */
 export type CreateUrlBody = z.output<typeof createUrlBodySchema>;
+export type UpdateUrlBody = z.output<typeof updateUrlBodySchema>;
 export type ShortCodeParams = z.output<typeof shortCodeParamsSchema>;
 export type ListUrlsQuery = z.output<typeof listUrlsQuerySchema>;
 
@@ -120,6 +163,11 @@ export function validateCreateUrlBody(input: unknown): ValidationResult<CreateUr
 /** Validate :shortCode path parameters (redirect and management routes). */
 export function validateShortCodeParams(input: unknown): ValidationResult<ShortCodeParams> {
   return validateParams(shortCodeParamsSchema, input);
+}
+
+/** Validate the PATCH /api/v1/urls/:shortCode request body. */
+export function validateUpdateUrlBody(input: unknown): ValidationResult<UpdateUrlBody> {
+  return validateBody(updateUrlBodySchema, input);
 }
 
 /** Validate GET /api/v1/urls query parameters. */

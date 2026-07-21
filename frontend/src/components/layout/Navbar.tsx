@@ -1,4 +1,5 @@
 import { MobileNav } from '@/components/layout/MobileNav';
+import { UserMenu } from '@/components/layout/UserMenu';
 import { ThemeToggle } from '@/components/common/ThemeToggle';
 import { Logo } from '@/components/common/Logo';
 
@@ -12,6 +13,7 @@ export function Navbar() {
       </div>
       <div className="ml-auto flex items-center gap-1">
         <ThemeToggle />
+        <UserMenu />
       </div>
     </header>
   );

@@ -1,11 +1,12 @@
 import request from 'supertest';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import app from '../../src/app';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
 import { disconnectRedis } from '../../src/config/redis';
 import { NullClickSink } from '../../src/modules/analytics/click.sink';
 import { NullRedirectCache } from '../../src/modules/url/url.cache';
-import { urlRepository } from '../../src/modules/url/url.repository';
+import { urlRepository } from '../../src/composition';
+import { registerTestUser } from './helpers';
 import { DefaultUrlService } from '../../src/modules/url/url.service';
 
 /**
@@ -15,9 +16,14 @@ import { DefaultUrlService } from '../../src/modules/url/url.service';
  */
 
 const createdIds: bigint[] = [];
+let auth: Awaited<ReturnType<typeof registerTestUser>>;
+
+beforeAll(async () => {
+  auth = await registerTestUser(app);
+});
 
 async function createLink(originalUrl: string): Promise<{ shortCode: string; id: bigint }> {
-  const response = await request(app).post('/api/v1/urls').send({ originalUrl });
+  const response = await request(app).post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`).send({ originalUrl });
   expect(response.status).toBe(201);
   const shortCode = response.body.data.shortCode as string;
   const row = await prisma.url.findUnique({ where: { shortCode } });
@@ -39,6 +45,7 @@ afterAll(async () => {
   if (createdIds.length > 0) {
     await prisma.clickEvent.deleteMany({ where: { urlId: { in: createdIds } } });
     await prisma.url.deleteMany({ where: { id: { in: createdIds } } });
+  await prisma.user.deleteMany({ where: { email: auth.email } });
   }
   await disconnectRedis();
   await disconnectPrisma();
@@ -75,7 +82,7 @@ describe('click recording on redirects', () => {
 
     // The approximate display counter catches up too (fire-and-forget).
     await waitFor(async () => {
-      const meta = await request(app).get(`/api/v1/urls/${shortCode}`);
+      const meta = await request(app).get(`/api/v1/urls/${shortCode}`).set('Authorization', `Bearer ${auth.accessToken}`);
       return meta.body.data.clickCount === 3;
     });
   });

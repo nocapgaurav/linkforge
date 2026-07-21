@@ -25,12 +25,16 @@ export interface Url {
   isActive: boolean;
   /** Expiry timestamp; null means the link never expires. */
   expiresAt: Date | null;
-  /** Owning user; null for anonymously created links. */
-  createdBy: bigint | null;
+  /** Owning user. Mandatory since the auth migration. */
+  createdBy: bigint;
   createdAt: Date;
   updatedAt: Date;
   /** Soft-delete tombstone; a non-null value means the row is deleted. */
   deletedAt: Date | null;
+  /** bcrypt hash gating the redirect; null = no password required. */
+  passwordHash: string | null;
+  /** Link dies after this many successful redirects; null = no limit. */
+  maxClicks: number | null;
 }
 
 /**
@@ -43,7 +47,7 @@ export interface CreateUrlInput {
   originalUrl: string;
   urlHash: string;
   expiresAt?: Date | null;
-  createdBy?: bigint | null;
+  createdBy: bigint;
 }
 
 /**
@@ -56,6 +60,10 @@ export interface UpdateUrlInput {
   isActive?: boolean;
   /** Pass null to clear the expiry (link never expires). */
   expiresAt?: Date | null;
+  /** Pass null to remove password protection. */
+  passwordHash?: string | null;
+  /** Pass null to remove the click-limit expiration. */
+  maxClicks?: number | null;
 }
 
 /**

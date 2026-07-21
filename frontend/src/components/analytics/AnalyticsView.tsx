@@ -17,6 +17,7 @@ import { PageHeader } from '@/components/common/PageHeader';
 import { CopyButton } from '@/components/links/CopyButton';
 import { Button } from '@/components/ui/button';
 import { useLinkAnalytics } from '@/hooks/useLinkAnalytics';
+import { ApiError } from '@/lib/api/client';
 import { shortUrlFor } from '@/lib/api/links';
 import { isAnalyticsRange, type AnalyticsRange } from '@/types/analytics';
 
@@ -76,7 +77,10 @@ export function AnalyticsView({ shortCode }: { shortCode: string }) {
       {analytics.isPending ? (
         <AnalyticsSkeleton />
       ) : analytics.isError ? (
-        <AnalyticsError onRetry={() => analytics.refetch()} />
+        <AnalyticsError
+          onRetry={() => analytics.refetch()}
+          notFound={analytics.error instanceof ApiError && analytics.error.status === 404}
+        />
       ) : analytics.data.summary.totalClicks === 0 ? (
         <AnalyticsEmpty shortUrl={shortUrl} />
       ) : (

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import app from '../../src/app';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
 import { disconnectRedis, redisClient } from '../../src/config/redis';
+import { registerTestUser } from './helpers';
 
 /**
  * Cache-aside integration tests against the real docker-compose stack
@@ -19,9 +20,10 @@ const redis = redisClient;
 
 const cacheKey = (shortCode: string) => `cache:url:v2:${shortCode}`;
 const createdCodes: string[] = [];
+let auth: Awaited<ReturnType<typeof registerTestUser>>;
 
 async function createLink(originalUrl: string): Promise<string> {
-  const response = await request(app).post('/api/v1/urls').send({ originalUrl });
+  const response = await request(app).post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`).send({ originalUrl });
   expect(response.status).toBe(201);
   const shortCode = response.body.data.shortCode as string;
   createdCodes.push(shortCode);
@@ -43,6 +45,7 @@ beforeAll(async () => {
   // The client is lazy; connect eagerly so the first test's fire-and-forget
   // SET doesn't race the initial connection handshake.
   if (redis.status === 'wait') await redis.connect();
+  auth = await registerTestUser(app);
 });
 
 afterAll(async () => {
@@ -52,6 +55,7 @@ afterAll(async () => {
     await prisma.clickEvent.deleteMany({ where: { url: { shortCode: { in: createdCodes } } } });
     await prisma.url.deleteMany({ where: { shortCode: { in: createdCodes } } });
   }
+  if (auth) await prisma.user.deleteMany({ where: { email: auth.email } });
   await disconnectRedis();
   await disconnectPrisma();
 });
@@ -98,7 +102,7 @@ describe('redirect cache-aside (real Redis + Postgres)', () => {
     await request(app).get(`/${code}`);
     await waitForKey(cacheKey(code));
 
-    const deletion = await request(app).delete(`/api/v1/urls/${code}`);
+    const deletion = await request(app).delete(`/api/v1/urls/${code}`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(deletion.status).toBe(200);
 
     await expect(redis.get(cacheKey(code))).resolves.toBeNull();
@@ -115,7 +119,7 @@ describe('redirect cache-aside (real Redis + Postgres)', () => {
     await expect(redis.get(cacheKey(code))).resolves.toBe('0');
 
     const created = await request(app)
-      .post('/api/v1/urls')
+      .post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`)
       .send({ originalUrl: 'https://example.com/was-negative', customAlias: code });
     expect(created.status).toBe(201);
     createdCodes.push(code);
@@ -136,7 +140,7 @@ describe('redirect cache-aside (real Redis + Postgres)', () => {
       expect(response.headers['location']).toBe('https://example.com/redis-down');
 
       // Management plane and 404s are equally unaffected.
-      const meta = await request(app).get(`/api/v1/urls/${code}`);
+      const meta = await request(app).get(`/api/v1/urls/${code}`).set('Authorization', `Bearer ${auth.accessToken}`);
       expect(meta.status).toBe(200);
       const missing = await request(app).get('/definitely-not-here');
       expect(missing.status).toBe(404);

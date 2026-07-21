@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import app from '../../src/app';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
 import { disconnectRedis } from '../../src/config/redis';
+import { registerTestUser } from './helpers';
 
 /**
  * End-to-end analytics endpoint tests: real HTTP stack, real Postgres.
@@ -13,10 +14,15 @@ import { disconnectRedis } from '../../src/config/redis';
 
 const DAY_MS = 86_400_000;
 const createdIds: bigint[] = [];
+let auth: Awaited<ReturnType<typeof registerTestUser>>;
+
+beforeAll(async () => {
+  auth = await registerTestUser(app);
+});
 
 async function createLink(): Promise<{ shortCode: string; id: bigint }> {
   const response = await request(app)
-    .post('/api/v1/urls')
+    .post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`)
     .send({ originalUrl: 'https://example.com/analytics-api' });
   expect(response.status).toBe(201);
   const shortCode = response.body.data.shortCode as string;
@@ -43,6 +49,7 @@ async function seedEvent(
 afterAll(async () => {
   await prisma.clickEvent.deleteMany({ where: { urlId: { in: createdIds } } });
   await prisma.url.deleteMany({ where: { id: { in: createdIds } } });
+  await prisma.user.deleteMany({ where: { email: auth.email } });
   await disconnectRedis();
   await disconnectPrisma();
 });
@@ -51,7 +58,7 @@ describe('GET /api/v1/urls/:shortCode/analytics', () => {
   it('returns empty analytics with a fully zero-filled default 30-day series', async () => {
     const { shortCode } = await createLink();
 
-    const response = await request(app).get(`/api/v1/urls/${shortCode}/analytics`);
+    const response = await request(app).get(`/api/v1/urls/${shortCode}/analytics`).set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     const { data } = response.body;
@@ -80,7 +87,7 @@ describe('GET /api/v1/urls/:shortCode/analytics', () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    const response = await request(app).get(`/api/v1/urls/${shortCode}/analytics`);
+    const response = await request(app).get(`/api/v1/urls/${shortCode}/analytics`).set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     const { data } = response.body;
@@ -111,7 +118,7 @@ describe('GET /api/v1/urls/:shortCode/analytics', () => {
     const to = new Date().toISOString();
     const response = await request(app).get(
       `/api/v1/urls/${shortCode}/analytics?from=${from}&to=${to}`,
-    );
+    ).set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     const { data } = response.body;
@@ -128,12 +135,12 @@ describe('GET /api/v1/urls/:shortCode/analytics', () => {
   it('supports week and month intervals', async () => {
     const { shortCode } = await createLink();
 
-    const week = await request(app).get(`/api/v1/urls/${shortCode}/analytics?interval=week`);
+    const week = await request(app).get(`/api/v1/urls/${shortCode}/analytics?interval=week`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(week.status).toBe(200);
     expect(week.body.data.series.length).toBeGreaterThanOrEqual(4);
     expect(week.body.data.series.length).toBeLessThanOrEqual(6);
 
-    const month = await request(app).get(`/api/v1/urls/${shortCode}/analytics?interval=month`);
+    const month = await request(app).get(`/api/v1/urls/${shortCode}/analytics?interval=month`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(month.status).toBe(200);
     expect(month.body.data.series.length).toBeLessThanOrEqual(2);
   });
@@ -144,31 +151,31 @@ describe('GET /api/v1/urls/:shortCode/analytics', () => {
 
     const inverted = await request(app).get(
       `${base}?from=2026-07-10T00:00:00Z&to=2026-07-01T00:00:00Z`,
-    );
+    ).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(inverted.status).toBe(400);
     expect(inverted.body.error.code).toBe('VALIDATION_ERROR');
     expect(inverted.body.error.details[0].field).toBe('to');
 
     const tooWide = await request(app).get(
       `${base}?from=2025-01-01T00:00:00Z&to=2026-06-01T00:00:00Z`,
-    );
+    ).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(tooWide.status).toBe(400);
 
-    const badInterval = await request(app).get(`${base}?interval=hour`);
+    const badInterval = await request(app).get(`${base}?interval=hour`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(badInterval.status).toBe(400);
 
-    const badDate = await request(app).get(`${base}?from=yesterday`);
+    const badDate = await request(app).get(`${base}?from=yesterday`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(badDate.status).toBe(400);
   });
 
   it('returns 404 for unknown and soft-deleted short codes', async () => {
-    const unknown = await request(app).get('/api/v1/urls/doesnotexist/analytics');
+    const unknown = await request(app).get('/api/v1/urls/doesnotexist/analytics').set('Authorization', `Bearer ${auth.accessToken}`);
     expect(unknown.status).toBe(404);
     expect(unknown.body.error.code).toBe('NOT_FOUND');
 
     const { shortCode } = await createLink();
-    await request(app).delete(`/api/v1/urls/${shortCode}`);
-    const deleted = await request(app).get(`/api/v1/urls/${shortCode}/analytics`);
+    await request(app).delete(`/api/v1/urls/${shortCode}`).set('Authorization', `Bearer ${auth.accessToken}`);
+    const deleted = await request(app).get(`/api/v1/urls/${shortCode}/analytics`).set('Authorization', `Bearer ${auth.accessToken}`);
     expect(deleted.status).toBe(404);
   });
 });

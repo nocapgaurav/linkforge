@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
-import { clickRepository } from '../../src/modules/analytics/click.repository';
+import { PrismaClickRepository } from '../../src/modules/analytics/click.repository';
+
+const clickRepository = new PrismaClickRepository(prisma);
 
 /**
  * Repository integration tests against the real Postgres from
@@ -9,6 +11,7 @@ import { clickRepository } from '../../src/modules/analytics/click.repository';
  * one) and everything is cleaned up afterwards.
  */
 
+let ownerId: bigint;
 let urlId: bigint;
 const eventIds: string[] = [];
 
@@ -19,11 +22,20 @@ function newEventId(): string {
 }
 
 beforeAll(async () => {
+  const owner = await prisma.user.create({
+    data: {
+      email: `clk-${randomUUID()}@test.linkforge.local`,
+      displayName: 'Click Fixture',
+      passwordHash: 'x'.repeat(60),
+    },
+  });
+  ownerId = owner.id;
   const url = await prisma.url.create({
     data: {
       shortCode: `clk${Date.now().toString(36)}`,
       originalUrl: 'https://example.com/analytics-target',
       urlHash: 'c'.repeat(64),
+      createdBy: ownerId,
     },
   });
   urlId = url.id;
@@ -32,6 +44,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.clickEvent.deleteMany({ where: { eventId: { in: eventIds } } });
   await prisma.url.delete({ where: { id: urlId } });
+  await prisma.user.deleteMany({ where: { id: ownerId } });
   await disconnectPrisma();
 });
 

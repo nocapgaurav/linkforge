@@ -18,6 +18,16 @@ export interface ValidationIssue {
   message: string;
 }
 
+/**
+ * bcrypt only hashes the first 72 BYTES of input; accepting longer
+ * passwords would silently ignore the tail, so every bcrypt-backed
+ * password field rejects them instead. A genuine shared technical
+ * constraint (not a business rule), so both account passwords
+ * (auth.validation.ts) and link passwords (url.validation.ts) reference
+ * this one constant rather than each hardcoding it.
+ */
+export const BCRYPT_MAX_PASSWORD_BYTES = 72;
+
 /** Validation failure in the exact shape of the public API error envelope. */
 export interface ValidationFailure {
   success: false;

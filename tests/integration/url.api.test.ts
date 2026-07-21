@@ -1,8 +1,9 @@
 import request from 'supertest';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import app from '../../src/app';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
 import { disconnectRedis } from '../../src/config/redis';
+import { registerTestUser } from './helpers';
 
 /**
  * Full-stack integration tests: real Express app, real validation,
@@ -12,9 +13,14 @@ import { disconnectRedis } from '../../src/config/redis';
  */
 
 const createdCodes: string[] = [];
+let auth: Awaited<ReturnType<typeof registerTestUser>>;
+
+beforeAll(async () => {
+  auth = await registerTestUser(app);
+});
 
 async function createLink(body: Record<string, unknown>) {
-  const response = await request(app).post('/api/v1/urls').send(body);
+  const response = await request(app).post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`).send(body);
   if (response.status === 201) {
     createdCodes.push(response.body.data.shortCode);
   }
@@ -25,6 +31,7 @@ afterAll(async () => {
   // Redirects record click events now; clear children before the FK parent.
   await prisma.clickEvent.deleteMany({ where: { url: { shortCode: { in: createdCodes } } } });
   await prisma.url.deleteMany({ where: { shortCode: { in: createdCodes } } });
+  await prisma.user.deleteMany({ where: { email: auth.email } });
   await disconnectRedis();
   await disconnectPrisma();
 });
@@ -67,7 +74,7 @@ describe('URL API end-to-end', () => {
     });
     const code = created.body.data.shortCode;
 
-    const response = await request(app).get(`/api/v1/urls/${code}`);
+    const response = await request(app).get(`/api/v1/urls/${code}`).set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
@@ -80,6 +87,8 @@ describe('URL API end-to-end', () => {
         isActive: true,
         clickCount: 0,
         expiresAt: '2030-01-01T00:00:00.000Z',
+        maxClicks: null,
+        hasPassword: false,
         createdAt: expect.any(String),
         updatedAt: expect.any(String),
       },
@@ -90,7 +99,7 @@ describe('URL API end-to-end', () => {
     const created = await createLink({ originalUrl: 'https://example.com/e2e-delete' });
     const code = created.body.data.shortCode;
 
-    const response = await request(app).delete(`/api/v1/urls/${code}`);
+    const response = await request(app).delete(`/api/v1/urls/${code}`).set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
@@ -105,7 +114,7 @@ describe('URL API end-to-end', () => {
   it('redirect after deletion returns 404 with the standard envelope', async () => {
     const created = await createLink({ originalUrl: 'https://example.com/e2e-dead' });
     const code = created.body.data.shortCode;
-    await request(app).delete(`/api/v1/urls/${code}`);
+    await request(app).delete(`/api/v1/urls/${code}`).set('Authorization', `Bearer ${auth.accessToken}`);
 
     const response = await request(app).get(`/${code}`);
 
@@ -116,7 +125,7 @@ describe('URL API end-to-end', () => {
 
   it('validation failure returns 400 with field details', async () => {
     const response = await request(app)
-      .post('/api/v1/urls')
+      .post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`)
       .send({ originalUrl: 'ftp://nope.example', customAlias: 'x' });
 
     expect(response.status).toBe(400);
@@ -136,7 +145,7 @@ describe('URL API end-to-end', () => {
 
   it('malformed JSON returns 400 MALFORMED_JSON', async () => {
     const response = await request(app)
-      .post('/api/v1/urls')
+      .post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`)
       .set('Content-Type', 'application/json')
       .send('{"originalUrl": ');
 
@@ -149,7 +158,7 @@ describe('URL API end-to-end', () => {
     await createLink({ originalUrl: 'https://example.com/first', customAlias: alias });
 
     const response = await request(app)
-      .post('/api/v1/urls')
+      .post('/api/v1/urls').set('Authorization', `Bearer ${auth.accessToken}`)
       .send({ originalUrl: 'https://example.com/second', customAlias: alias });
 
     expect(response.status).toBe(409);

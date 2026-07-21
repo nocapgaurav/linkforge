@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { analyticsController } from './analytics.controller.js';
+import { analyticsController } from '../../composition.js';
 
 /**
  * Analytics sub-resource routes, mounted at /api/v1/urls alongside the URL

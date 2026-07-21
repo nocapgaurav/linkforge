@@ -63,10 +63,10 @@ Error:
 | Header | Direction | v1 behavior |
 |---|---|---|
 | `Content-Type: application/json` | request | Required on POST/PATCH |
-| `Authorization: Bearer <token>` | request | **Reserved.** Ignored in v1; will scope requests to a user/team without any URL changes |
+| `Authorization: Bearer <token>` | request | **Required on all management endpoints** (everything under `/api/v1/urls`). Carries the access token from §11. Missing/invalid → 401 `UNAUTHORIZED` |
 | `X-API-Key: <key>` | request | **Reserved.** Alternative machine credential, same forward-compat contract |
 | `X-Request-Id` | response | Unique id per request, echoed for support/debugging |
-| `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` | response | **Reserved.** Sent once rate limiting ships; clients should tolerate their presence |
+| `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` | response | **Implemented** (2026-07-21). Sent on every response from a rate-limited endpoint (§12), success or `429` alike, whenever Redis is actually enforcing the limit. `Limit` is the endpoint's configured max per window; `Remaining` is what's left in the current window (never negative); `Reset` is seconds until the window rolls over. Omitted when Redis is unavailable — fail-open means no limiting is actually happening, so no headers describing a limit that isn't being enforced |
 
 ### 1.5 Data conventions
 
@@ -91,6 +91,8 @@ The representation returned by every endpoint that returns a link:
   "isActive": true,
   "clickCount": 42,
   "expiresAt": null,
+  "maxClicks": null,
+  "hasPassword": false,
   "createdAt": "2026-07-19T12:00:00.000Z",
   "updatedAt": "2026-07-19T12:00:00.000Z"
 }
@@ -100,9 +102,12 @@ Notes:
 - `shortUrl` is computed server-side from the configured public domain. When
   custom domains ship, this field simply reflects the link's domain — no
   contract change.
-- Not exposed: `id`, `urlHash`, `createdBy`, `deletedAt` (internal).
-- Future additive fields (non-breaking): `domain`, `teamId`, `hasPassword`,
-  `qrCodeUrl`, `tags`.
+- Not exposed: `id`, `urlHash`, `createdBy`, `deletedAt`, `passwordHash`
+  (internal — `hasPassword` is the only signal a password exists).
+- `maxClicks` and `hasPassword` are implemented (§7a), settable only via
+  `PATCH /api/v1/urls/:shortCode` — neither is accepted on create (§2).
+- Future additive fields (non-breaking): `domain`, `teamId`, `qrCodeUrl`,
+  `tags`.
 
 ---
 
@@ -113,8 +118,9 @@ alias and optional expiry.
 
 **Method / Route**: `POST /api/v1/urls`
 
-**Request headers**: `Content-Type: application/json` (required).
-`Authorization` / `X-API-Key` reserved (see §1.4).
+**Request headers**: `Content-Type: application/json` and
+`Authorization: Bearer <accessToken>` (both required). The created link is
+owned by the authenticated caller.
 
 **Path parameters**: none. **Query parameters**: none.
 
@@ -153,7 +159,7 @@ Reserved future body fields (will be additive, never repurposed): `domain`,
 | 400 | `MALFORMED_JSON` | Body is not parseable JSON |
 | 409 | `ALIAS_TAKEN` | `customAlias` already in use (including tombstoned codes — codes are never recycled) |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | Missing/wrong `Content-Type` |
-| 429 | `RATE_LIMITED` | Reserved for rate limiting |
+| 429 | `RATE_LIMITED` | Per-user create limit exceeded (see §12) |
 | 500 | `INTERNAL_ERROR` | Unexpected failure |
 
 ---
@@ -214,9 +220,9 @@ including states the redirect plane hides (inactive, expired).
 
 **Method / Route**: `GET /api/v1/urls/:shortCode`
 
-**Request headers**: none required in v1. `Authorization` reserved — once
-auth ships, this endpoint returns only links the caller may view, with `404`
-(not `403`) for other owners' links to avoid confirming code existence.
+**Request headers**: `Authorization: Bearer <accessToken>` (required).
+Returns only links the caller owns, with `404` (not `403`) for other
+owners' links to avoid confirming code existence.
 
 **Path parameters**: `shortCode` — same shape rules as §3.
 
@@ -244,11 +250,9 @@ The redirect plane starts returning `404` immediately.
 
 **Method / Route**: `DELETE /api/v1/urls/:shortCode`
 
-**Request headers**: none required in v1. **Security note**: until
-authentication ships, anyone who knows a short code can delete it. This is
-an accepted v1 gap, documented so it is not mistaken for a design intent —
-the endpoint becomes owner-scoped the moment auth lands, with no contract
-change.
+**Request headers**: `Authorization: Bearer <accessToken>` (required).
+Owner-scoped: another owner's code is a plain `404` (the v1 open-delete gap
+is closed as of the auth release).
 
 **Path parameters**: `shortCode` — same shape rules as §3.
 
@@ -293,8 +297,11 @@ never renamed or repurposed.
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | Wrong/missing Content-Type |
 | `NOT_FOUND` | 404 | Resource absent (or hidden — see §3, §4) |
 | `ALIAS_TAKEN` | 409 | Requested custom alias already in use |
-| `RATE_LIMITED` | 429 | Reserved: request quota exceeded |
-| `UNAUTHORIZED` | 401 | Reserved: missing/invalid credentials |
+| `RATE_LIMITED` | 429 | Request quota exceeded (see §12) |
+| `PASSWORD_REQUIRED` | 401 | Link is password-protected; `?password=` missing or wrong (identical response for both) |
+| `UNAUTHORIZED` | 401 | Missing, malformed, expired, or revoked token/session |
+| `INVALID_CREDENTIALS` | 401 | Login failed (never says whether email or password was wrong) |
+| `EMAIL_TAKEN` | 409 | Registration email already has an account |
 | `FORBIDDEN` | 403 | Reserved: authenticated but not allowed |
 | `NOT_IMPLEMENTED` | 501 | Reserved: endpoint specified but not yet live (none currently) |
 | `INTERNAL_ERROR` | 500 | Unexpected server failure; safe generic message |
@@ -316,10 +323,8 @@ individual events are never exposed (privacy posture; see
 
 **Method / Route**: `GET /api/v1/urls/:shortCode/analytics`
 
-**Request headers**: none required. **Known v1 gap** (same class as DELETE):
-until authentication ships, anyone who knows a short code can read its
-analytics; the endpoint becomes owner-scoped when auth lands, with no
-contract change.
+**Request headers**: `Authorization: Bearer <accessToken>` (required).
+Owner-scoped: another owner's code is a plain `404`.
 
 **Path parameters**: `shortCode` — same shape rules as §3; `404` for
 unknown **or soft-deleted** links (management plane hides tombstones).
@@ -394,6 +399,104 @@ Contract properties:
 | 404 | `NOT_FOUND` | No live link with that code |
 | 500 | `INTERNAL_ERROR` | Unexpected failure |
 
+## 7a. `PATCH /api/v1/urls/:shortCode` — Edit a link
+
+**Implemented** (2026-07-20). Partial update: only provided fields change.
+Requires `Authorization: Bearer` (owner-scoped like every management
+endpoint); another owner's code is a plain `404`.
+
+**Method / Route**: `PATCH /api/v1/urls/:shortCode`
+
+**Request body** (all optional; `strictObject` — unknown fields rejected):
+
+| Field | Type | Rules |
+|---|---|---|
+| `originalUrl` | string | Same rules as create (§2) |
+| `expiresAt` | ISO 8601 or `null` | Must be in the future, exactly like create. `null` clears it. To kill a link *immediately*, use `isActive: false` instead — `expiresAt` always means "schedule a future expiration," in both create and edit |
+| `maxClicks` | integer ≥ 1, or `null` | Third expiration mode: the link dies after this many successful redirects. `null` removes the limit |
+| `password` | string (4–72 bytes), or `null` | Sets/changes the link's password gate. `null` removes password protection |
+| `isActive` | boolean | Activate/deactivate. Inactive links 404 on redirect; metadata and analytics stay visible |
+
+**Immutable, deliberately not editable**: `shortCode` — a link's public
+identity, once issued, never changes (cache keys, click attribution, and
+outstanding shared links all depend on it).
+
+**Success response**: `200 OK` — the updated URL resource (§1.6, now
+including `maxClicks` and `hasPassword` — see below). Redirect caching for
+this code is invalidated unconditionally, since any field here can change
+the redirect decision.
+
+**Error responses**: `400 VALIDATION_ERROR`, `404 NOT_FOUND` (missing or
+not-yours).
+
+**The URL resource gains two fields** as of this release:
+`maxClicks: number | null` and `hasPassword: boolean`. `passwordHash` is
+never serialized under any field name.
+
+## 7b. Expiration, click limits, and password protection at redirect time
+
+The redirect (`GET /:shortCode`) lookup order is now:
+
+```
+find → isActive? → time-expired? → click-limit reached? → password OK? → 302
+```
+
+- **Never delete expired/exhausted links.** All existing rows stay exactly
+  as they are; only the redirect decision changes. Analytics and metadata
+  remain available for any dead link — deactivated, time-expired, or
+  click-exhausted alike.
+- **Uniform 404** still applies to the first three gates (missing,
+  inactive, time-expired, click-exhausted are indistinguishable) —
+  extending the existing anti-enumeration doctrine (§3).
+- **Password gate is a distinct signal**, `401 PASSWORD_REQUIRED`, not
+  folded into the uniform 404: a password prompt already discloses "this
+  link exists and is live," so there's nothing left to hide by pretending
+  otherwise. Checked *after* the other gates, so a dead link never prompts
+  for a password. Missing and wrong password produce the byte-identical
+  response — no signal about which. A failed attempt is never counted as
+  a successful redirect (it doesn't consume a click-limit slot).
+- **Password submission**: `GET /:shortCode?password=...` — a query
+  parameter, not a header or a second endpoint, so the redirect stays a
+  single public `GET` (no RPC-style companion route). Trade-off, stated
+  plainly: query parameters can land in browser history, server logs, and
+  the `Referer` header of whatever the destination page loads next. This
+  is an accepted v1 trade-off pending a real "unlock" UX in the frontend.
+- **Click-limit enforcement is exact**, not the approximate `clickCount`
+  used for display/analytics elsewhere: it's a single atomic
+  conditional-increment SQL statement (`UPDATE … WHERE click_count <
+  maxClicks`), race-free under concurrent requests. A password-protected
+  or click-limited link is **never served from the Redis redirect cache**
+  — both properties require a fresh read on every request (a hash that
+  shouldn't sit in the cache; a count that changes every request) — so
+  only plain links (no password, no click limit) get the existing
+  cache-aside speedup. This is unchanged, existing behavior for every
+  link that doesn't opt into these two features.
+
+## 12. Rate limiting
+
+**Implemented** (2026-07-20). Redis-backed, fixed-window, fail-open: if
+Redis is unavailable, every limiter becomes a pass-through and requests
+succeed exactly as if rate limiting didn't exist — availability wins over
+throttling precision, matching the redirect cache's existing philosophy.
+
+| Endpoint | Limit | Keyed by |
+|---|---|---|
+| `POST /api/v1/auth/register` | 20 / hour | Client IP |
+| `POST /api/v1/auth/login` | 30 / 15 min | Client IP |
+| `POST /api/v1/urls` | 30 / minute | Authenticated user |
+| `GET /:shortCode` (redirect) | 60 / minute | Client IP |
+
+Exceeding a limit returns `429 RATE_LIMITED` in the standard envelope.
+Limits are independent per endpoint and per key — one user's or IP's usage
+never affects another's. The redirect limit doubles as bounded protection
+against brute-forcing a link's password, on top of bcrypt's inherent
+per-guess cost.
+
+Every response from a limited endpoint carries `RateLimit-Limit`,
+`RateLimit-Remaining`, `RateLimit-Reset` (see §1.4) — on the `429` itself,
+not only on successful requests, so a client can read exactly how long to
+back off without parsing the error body.
+
 ## 8. Forward-compatibility design notes
 
 How each planned feature lands without breaking v1 clients:
@@ -411,13 +514,12 @@ How each planned feature lands without breaking v1 clients:
   (mirrors the analytics pattern).
 - **Link expiration**: already first-class in v1 (`expiresAt` in the create
   body and resource).
-- **Password-protected links**: additive `password` field on create;
-  resource gains boolean `hasPassword` (never the password itself); the
-  redirect plane serves an interstitial instead of `302` for such links —
-  new behavior on new links only.
-- **Link updates**: `PATCH /api/v1/urls/:shortCode` is the reserved route
-  (repository `update()` already supports it); not part of v1's public
-  surface.
+- **Password-protected links**: **implemented** (§7a/§7b) — `password` is
+  settable via `PATCH`, never on create; resource gains boolean
+  `hasPassword` (never the password itself); the redirect plane requires
+  `?password=` instead of serving a plain `302` for such links.
+- **Link updates**: **implemented** — `PATCH /api/v1/urls/:shortCode` is
+  part of v1's public surface (§7a), not merely reserved.
 - **Listing**: shipped — see §9. (Pagination landed inside `data` as a
   `pagination` key rather than the once-sketched envelope-level `meta`; the
   envelope stays untouched.) Becomes owner-scoped when auth lands.
@@ -434,12 +536,8 @@ How each planned feature lands without breaking v1 clients:
 **Purpose**: Newest-first listing of live (non-deleted) links with cursor
 pagination, for the dashboard.
 
-> **Public demo limitation**: LinkForge has no authentication yet, so this
-> endpoint lists **every** link in the deployment — the same accepted-gap
-> class as unauthenticated DELETE (§5), but broader, since it exposes
-> original URLs without knowing any code. Acceptable for local/demo use
-> only; do not expose a public deployment with this endpoint enabled. When
-> auth ships the route is unchanged and results simply become owner-scoped.
+> **Superseded** (auth release): this endpoint now requires authentication
+> and returns only the caller's own links — the demo-era exposure is closed.
 
 **Method / Route**: `GET /api/v1/urls`
 
@@ -493,6 +591,57 @@ Cross-origin browser access is opt-in per deployment via the
 `FRONTEND_ORIGIN` environment variable (exactly one origin; never
 hardcoded). When set, responses to that origin carry
 `Access-Control-Allow-Origin` (+ `Vary: Origin`), and `OPTIONS` preflights
-answer `204` allowing `GET,POST,DELETE` with `Content-Type`. When unset,
-no CORS headers are emitted and browsers cannot call the API cross-origin —
-the pre-CORS behavior.
+answer `204` allowing `GET,POST,PATCH,DELETE` with `Content-Type,
+Authorization`. When unset, no CORS headers are emitted and browsers cannot
+call the API cross-origin — the pre-CORS behavior.
+
+`PATCH` and `Authorization` were added during frontend integration
+(2026-07-20): the original allowlist predated both link editing (Phase 2)
+and Bearer-token auth (Phase 1), so the browser's CORS preflight was
+silently blocking every authenticated and edit request — invisible to
+curl-based testing, which never performs a preflight, and caught only by
+driving the real frontend against the real backend in a browser.
+
+
+## 11. Authentication
+
+**Implemented** (2026-07-20). LinkForge is multi-user: every link belongs to
+exactly one account, and the management plane (`/api/v1/urls/**`) requires a
+Bearer access token. The redirect plane (`GET /:shortCode`) remains fully
+public.
+
+**Token model** — short-lived access token + rotating session:
+
+- **Access token**: HS256 JWT, 15-minute TTL, sent as
+  `Authorization: Bearer <token>`. Stateless — protected requests never
+  touch the session store.
+- **Refresh token**: opaque 256-bit random string identifying a server-side
+  *session* (30-day TTL, stored only as a SHA-256 hash). Refreshing
+  **rotates** it: the presented token is retired and a new one issued.
+  Presenting an already-retired token is treated as theft and revokes every
+  session for that account. Logout revokes server-side.
+
+| Endpoint | Body | Success | Errors |
+|---|---|---|---|
+| `POST /api/v1/auth/register` | `{email, displayName, password}` | `201` `{user, accessToken, refreshToken, expiresIn}` | 400, 409 `EMAIL_TAKEN` |
+| `POST /api/v1/auth/login` | `{email, password}` | `200` (same shape) | 400, 401 `INVALID_CREDENTIALS` |
+| `POST /api/v1/auth/refresh` | `{refreshToken}` | `200` `{accessToken, refreshToken, expiresIn}` | 400, 401 |
+| `POST /api/v1/auth/logout` | `{refreshToken}` | `200` `{loggedOut: true}` (idempotent) | 400 |
+| `GET /api/v1/auth/me` | — (Bearer) | `200` `{user}` | 401 |
+
+**The user resource**: `{email, displayName, emailVerifiedAt, createdAt}` —
+internal ids and password hashes are never exposed (same doctrine as links).
+
+**Validation**: email ≤255 chars (stored lowercased; login is
+case-insensitive), displayName 1–80 chars, password 8+ chars and ≤72 bytes
+(bcrypt's input limit — longer would be silently truncated, so it is
+rejected instead). Passwords are bcrypt-hashed (work factor 12,
+configurable via `BCRYPT_COST`).
+
+**Ownership semantics**: create stamps the caller as owner; list returns
+only the caller's links; metadata/delete/analytics on another owner's code
+return `404 NOT_FOUND` — not `403` — per the anti-enumeration doctrine
+(§3, §4): responses never confirm that a code exists.
+
+**Demo account**: the migration seeds `demo@linkforge.local` /
+`demo-password`, which owns all pre-auth links. Local/demo use only.

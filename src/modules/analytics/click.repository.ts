@@ -1,4 +1,3 @@
-import { prisma } from '../../config/prisma.js';
 import type { PrismaClient } from '../../generated/prisma/client.js';
 import type { NewClickEvent } from './click.types.js';
 
@@ -57,6 +56,3 @@ export class PrismaClickRepository implements ClickRepository {
     return found !== null;
   }
 }
-
-/** Application-wide repository instance wired to the shared Prisma client. */
-export const clickRepository: ClickRepository = new PrismaClickRepository(prisma);

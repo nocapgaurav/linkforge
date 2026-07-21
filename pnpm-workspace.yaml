@@ -4,6 +4,7 @@ packages:
 allowBuilds:
   '@prisma/engines': true
   '@tailwindcss/oxide': true
+  bcrypt: true
   esbuild: true
   prisma: true
   sharp: true

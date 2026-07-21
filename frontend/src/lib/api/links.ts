@@ -1,5 +1,11 @@
 import { api } from '@/lib/api/client';
-import type { CreateLinkInput, DeleteLinkReceipt, Link, LinkListPage } from '@/types/link';
+import type {
+  CreateLinkInput,
+  DeleteLinkReceipt,
+  Link,
+  LinkListPage,
+  UpdateLinkInput,
+} from '@/types/link';
 
 /**
  * Link endpoints, typed end to end. Pure request functions — no caching,
@@ -21,6 +27,11 @@ export function createLink(input: CreateLinkInput): Promise<Link> {
 
 export function deleteLink(shortCode: string): Promise<DeleteLinkReceipt> {
   return api.delete<DeleteLinkReceipt>(`/urls/${encodeURIComponent(shortCode)}`);
+}
+
+/** Partial update (spec §7a) — only the provided fields change. */
+export function updateLink(shortCode: string, input: UpdateLinkInput): Promise<Link> {
+  return api.patch<Link>(`/urls/${encodeURIComponent(shortCode)}`, input);
 }
 
 /**

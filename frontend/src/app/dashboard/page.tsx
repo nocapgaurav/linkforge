@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
 import { DashboardStats } from '@/components/dashboard/DashboardStats';
-import { SearchPlaceholder } from '@/components/dashboard/SearchPlaceholder';
 import { CreateLinkForm } from '@/components/links/CreateLinkForm';
 import { LinkTable } from '@/components/links/LinkTable';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
@@ -16,10 +15,7 @@ export default function DashboardPage() {
       <div className="space-y-8">
         <DashboardStats />
         <CreateLinkForm />
-        <div className="space-y-4">
-          <SearchPlaceholder />
-          <LinkTable />
-        </div>
+        <LinkTable />
       </div>
     </DashboardLayout>
   );

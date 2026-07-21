@@ -25,8 +25,17 @@ model Url {
   // Design doc calls for a partial index (WHERE expires_at IS NOT NULL);
   // Prisma cannot declare partial indexes, so this is a full index for now.
   expiresAt     DateTime? @map("expires_at") @db.Timestamptz(6)
-  // Future FK to User; nullable so anonymous shortening works before auth.
-  createdBy     BigInt?   @map("created_by")
+  // Owner. NOT NULL since the auth migration: legacy anonymous rows were
+  // assigned to the seeded demo user, so ownership is mandatory everywhere.
+  createdBy     BigInt    @map("created_by")
+  // bcrypt hash gating the redirect; null = no password required. Same
+  // width as users.password_hash. Never exposed — only `hasPassword` is.
+  passwordHash  String?   @map("password_hash") @db.VarChar(255)
+  // Third expiration mode alongside expiresAt: link dies after this many
+  // successful redirects. Null = no click-based limit. Enforced via an
+  // atomic conditional increment (see url.repository.ts), not the
+  // approximate clickCount path used for display/analytics.
+  maxClicks     Int?      @map("max_clicks")
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
   // Soft delete: codes are tombstoned, never recycled.
@@ -34,10 +43,62 @@ model Url {
 
   clickEvents ClickEvent[]
 
+  // Restrict: deleting a user with links is a product decision (transfer or
+  // purge) that must be explicit, never a silent cascade of live redirects.
+  creator User @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
   @@index([urlHash])
   @@index([expiresAt])
   @@index([createdBy, createdAt(sort: Desc)])
   @@map("urls")
+}
+
+model User {
+  id              BigInt    @id @default(autoincrement())
+  // Stored lowercased (validation normalizes); unique is the login key.
+  email           String    @unique @db.VarChar(255)
+  displayName     String    @map("display_name") @db.VarChar(80)
+  passwordHash    String    @map("password_hash") @db.VarChar(255)
+  // Null until an email-verification flow ships; column exists now so the
+  // flow is additive.
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  // Soft delete, mirroring Url's exact tombstone pattern: the row (and its
+  // email) is retained rather than hard-deleted, since Url.creator is
+  // onDelete: Restrict — a user with any links (even soft-deleted ones)
+  // cannot be removed from Postgres without an explicit purge decision,
+  // which this feature deliberately doesn't make. A non-null value means
+  // the account is deleted: findByEmail/findById hide it (so login and
+  // authenticated reads both treat it as gone), and all sessions are
+  // revoked at the same time it's set.
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  urls     Url[]
+  sessions Session[]
+
+  @@map("users")
+}
+
+// Authenticated sessions (docs: auth Phase 1). One row per login; the
+// opaque refresh token is stored ONLY as a SHA-256 hash. Rotation writes a
+// new row and revokes the old; revoked rows are kept as login history and
+// for token-reuse detection.
+model Session {
+  id         BigInt    @id @default(autoincrement())
+  userId     BigInt    @map("user_id")
+  tokenHash  String    @unique @map("token_hash") @db.Char(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+
+  // Sessions are meaningless without their user; cascade is safe here.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // "List/revoke my sessions" and revoke-all both query by user.
+  @@index([userId])
+  @@map("sessions")
 }
 
 // Append-only click event log (docs/analytics-design.md §3). Rows are

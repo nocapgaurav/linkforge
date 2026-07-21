@@ -23,8 +23,14 @@ export function corsMiddleware(allowedOrigin: string | undefined): RequestHandle
     if (req.headers.origin === origin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       if (req.method === 'OPTIONS') {
-        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        // PATCH (link editing, Phase 2) and Authorization (Bearer tokens,
+        // Phase 1) were both added to the API after this file was written;
+        // an unupdated allowlist here means the browser's CORS preflight
+        // silently blocks every authenticated / edit request before it
+        // ever reaches the server — curl-based testing never exercises
+        // preflight, so this stayed invisible until real browser testing.
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
         res.setHeader('Access-Control-Max-Age', '86400');
         res.status(204).end();
         return;

@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
+import bcrypt from 'bcrypt';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DefaultUrlService } from '../../../src/modules/url/url.service';
 import type { UrlRepository } from '../../../src/modules/url/url.repository';
 import {
   AliasAlreadyExistsError,
+  LinkPasswordRequiredError,
   ShortCodeGenerationError,
   UrlNotFoundError,
 } from '../../../src/modules/url/url.errors';
@@ -12,6 +14,9 @@ import type { CachedRedirect, RedirectCache } from '../../../src/modules/url/url
 import type { ClickSink } from '../../../src/modules/analytics/click.sink';
 
 const BASE62_CODE = /^[0-9A-Za-z]{7}$/;
+
+/** Owner used by every authenticated call in these tests. */
+const OWNER = 7n;
 
 function makeUrl(overrides: Partial<Url> = {}): Url {
   return {
@@ -23,10 +28,12 @@ function makeUrl(overrides: Partial<Url> = {}): Url {
     clickCount: 0n,
     isActive: true,
     expiresAt: null,
-    createdBy: null,
+    createdBy: OWNER,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     deletedAt: null,
+    passwordHash: null,
+    maxClicks: null,
     ...overrides,
   };
 }
@@ -39,7 +46,9 @@ function makeRepo() {
     list: vi.fn(),
     update: vi.fn(),
     incrementClickCount: vi.fn(),
+    incrementIfUnderClickLimit: vi.fn(),
     softDelete: vi.fn(),
+    findByShortCodeIncludingDeleted: vi.fn(),
   } satisfies UrlRepository;
 }
 
@@ -58,7 +67,7 @@ describe('DefaultUrlService', () => {
     it('creates with a generated base62 code, normalized URL, and SHA-256 hash', async () => {
       repo.create.mockImplementation(async (input) => makeUrl(input));
 
-      const result = await service.create({ originalUrl: 'https://Example.COM/Path?q=1' });
+      const result = await service.create({ originalUrl: 'https://Example.COM/Path?q=1' }, OWNER);
 
       expect(repo.create).toHaveBeenCalledTimes(1);
       const input = repo.create.mock.calls[0][0];
@@ -67,6 +76,7 @@ describe('DefaultUrlService', () => {
       expect(input.originalUrl).toBe('https://example.com/Path?q=1'); // host lowercased, path case kept
       expect(input.urlHash).toBe(sha256('https://example.com/Path?q=1'));
       expect(input.expiresAt).toBeNull();
+      expect(input.createdBy).toBe(OWNER);
       expect(result.shortCode).toBe(input.shortCode);
     });
 
@@ -78,7 +88,7 @@ describe('DefaultUrlService', () => {
         originalUrl: 'https://example.com',
         customAlias: 'My-Link_1',
         expiresAt,
-      });
+      }, OWNER);
 
       expect(repo.create).toHaveBeenCalledWith(
         expect.objectContaining({ shortCode: 'My-Link_1', isCustomAlias: true, expiresAt }),
@@ -89,7 +99,7 @@ describe('DefaultUrlService', () => {
       repo.create.mockRejectedValue(new ShortCodeConflictError('My-Link_1'));
 
       await expect(
-        service.create({ originalUrl: 'https://example.com', customAlias: 'My-Link_1' }),
+        service.create({ originalUrl: 'https://example.com', customAlias: 'My-Link_1' }, OWNER),
       ).rejects.toThrow(AliasAlreadyExistsError);
       expect(repo.create).toHaveBeenCalledTimes(1);
     });
@@ -100,7 +110,7 @@ describe('DefaultUrlService', () => {
         .mockRejectedValueOnce(new ShortCodeConflictError('y'))
         .mockImplementation(async (input) => makeUrl(input));
 
-      const result = await service.create({ originalUrl: 'https://example.com' });
+      const result = await service.create({ originalUrl: 'https://example.com' }, OWNER);
 
       expect(repo.create).toHaveBeenCalledTimes(3);
       for (const [input] of repo.create.mock.calls) {
@@ -112,7 +122,7 @@ describe('DefaultUrlService', () => {
     it('throws ShortCodeGenerationError after exhausting the retry budget', async () => {
       repo.create.mockRejectedValue(new ShortCodeConflictError('x'));
 
-      await expect(service.create({ originalUrl: 'https://example.com' })).rejects.toThrow(
+      await expect(service.create({ originalUrl: 'https://example.com' }, OWNER)).rejects.toThrow(
         ShortCodeGenerationError,
       );
       expect(repo.create).toHaveBeenCalledTimes(5);
@@ -122,7 +132,7 @@ describe('DefaultUrlService', () => {
       const boom = new Error('connection lost');
       repo.create.mockRejectedValue(boom);
 
-      await expect(service.create({ originalUrl: 'https://example.com' })).rejects.toBe(boom);
+      await expect(service.create({ originalUrl: 'https://example.com' }, OWNER)).rejects.toBe(boom);
       expect(repo.create).toHaveBeenCalledTimes(1);
     });
   });
@@ -158,17 +168,17 @@ describe('DefaultUrlService', () => {
     it('returns disabled and expired URLs', async () => {
       const disabled = makeUrl({ isActive: false });
       repo.findByShortCode.mockResolvedValue(disabled);
-      await expect(service.getMetadata('aB3xK9q')).resolves.toBe(disabled);
+      await expect(service.getMetadata('aB3xK9q', OWNER)).resolves.toBe(disabled);
 
       const expired = makeUrl({ expiresAt: new Date(Date.now() - 1000) });
       repo.findByShortCode.mockResolvedValue(expired);
-      await expect(service.getMetadata('aB3xK9q')).resolves.toBe(expired);
+      await expect(service.getMetadata('aB3xK9q', OWNER)).resolves.toBe(expired);
     });
 
     it('throws UrlNotFoundError for a missing code', async () => {
       repo.findByShortCode.mockResolvedValue(null);
 
-      await expect(service.getMetadata('nope123')).rejects.toThrow(UrlNotFoundError);
+      await expect(service.getMetadata('nope123', OWNER)).rejects.toThrow(UrlNotFoundError);
     });
   });
 
@@ -178,14 +188,14 @@ describe('DefaultUrlService', () => {
       repo.findByShortCode.mockResolvedValue(makeUrl({ id: 42n }));
       repo.softDelete.mockResolvedValue(deletedAt);
 
-      await expect(service.delete('aB3xK9q')).resolves.toBe(deletedAt);
+      await expect(service.delete('aB3xK9q', OWNER)).resolves.toBe(deletedAt);
       expect(repo.softDelete).toHaveBeenCalledWith(42n);
     });
 
     it('throws UrlNotFoundError for a missing code', async () => {
       repo.findByShortCode.mockResolvedValue(null);
 
-      await expect(service.delete('nope123')).rejects.toThrow(UrlNotFoundError);
+      await expect(service.delete('nope123', OWNER)).rejects.toThrow(UrlNotFoundError);
       expect(repo.softDelete).not.toHaveBeenCalled();
     });
 
@@ -193,7 +203,7 @@ describe('DefaultUrlService', () => {
       repo.findByShortCode.mockResolvedValue(makeUrl());
       repo.softDelete.mockResolvedValue(null);
 
-      await expect(service.delete('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+      await expect(service.delete('aB3xK9q', OWNER)).rejects.toThrow(UrlNotFoundError);
     });
   });
 });
@@ -320,7 +330,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.create.mockImplementation(async (input) => makeUrl(input));
       const service = new DefaultUrlService(repo, cache);
 
-      await service.create({ originalUrl: 'https://example.com', customAlias: 'My-Link_1' });
+      await service.create({ originalUrl: 'https://example.com', customAlias: 'My-Link_1' }, OWNER);
 
       expect(cache.del).toHaveBeenCalledWith('My-Link_1');
       expect(cache.set).not.toHaveBeenCalled();
@@ -331,7 +341,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.create.mockImplementation(async (input) => makeUrl(input));
       const service = new DefaultUrlService(repo, cache);
 
-      const url = await service.create({ originalUrl: 'https://example.com' });
+      const url = await service.create({ originalUrl: 'https://example.com' }, OWNER);
 
       expect(cache.del).toHaveBeenCalledWith(url.shortCode);
       expect(cache.set).not.toHaveBeenCalled();
@@ -343,7 +353,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.softDelete.mockResolvedValue(new Date());
       const service = new DefaultUrlService(repo, cache);
 
-      await service.delete('aB3xK9q');
+      await service.delete('aB3xK9q', OWNER);
 
       expect(cache.del).toHaveBeenCalledWith('aB3xK9q');
     });
@@ -353,7 +363,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.findByShortCode.mockResolvedValue(null);
       const service = new DefaultUrlService(repo, cache);
 
-      await expect(service.delete('nope123')).rejects.toThrow(UrlNotFoundError);
+      await expect(service.delete('nope123', OWNER)).rejects.toThrow(UrlNotFoundError);
       expect(cache.del).not.toHaveBeenCalled();
     });
   });
@@ -364,9 +374,9 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.list.mockResolvedValue(rows);
       const service = new DefaultUrlService(repo, makeCache());
 
-      const page = await service.list({ limit: 2 });
+      const page = await service.list({ limit: 2 }, OWNER);
 
-      expect(repo.list).toHaveBeenCalledWith({ limit: 3, before: undefined });
+      expect(repo.list).toHaveBeenCalledWith({ createdBy: OWNER, limit: 3, before: undefined });
       expect(page.items).toEqual(rows);
       expect(page.hasMore).toBe(false);
       expect(page.nextCursor).toBeNull();
@@ -381,7 +391,7 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       ]);
       const service = new DefaultUrlService(repo, makeCache());
 
-      const page = await service.list({ limit: 2 });
+      const page = await service.list({ limit: 2 }, OWNER);
 
       expect(page.items.map((u) => u.id)).toEqual([9n, 8n]);
       expect(page.hasMore).toBe(true);
@@ -393,9 +403,9 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       const service = new DefaultUrlService(repo, makeCache());
       const cursor = { createdAt: new Date('2026-07-01T00:00:00Z'), id: 5n };
 
-      const page = await service.list({ limit: 20, cursor });
+      const page = await service.list({ limit: 20, cursor }, OWNER);
 
-      expect(repo.list).toHaveBeenCalledWith({ limit: 21, before: cursor });
+      expect(repo.list).toHaveBeenCalledWith({ createdBy: OWNER, limit: 21, before: cursor });
       expect(page).toEqual({ items: [], nextCursor: null, hasMore: false });
     });
   });
@@ -559,8 +569,329 @@ describe('DefaultUrlService with RedirectCache (cache-aside)', () => {
       repo.softDelete.mockResolvedValue(deletedAt);
       const service = new DefaultUrlService(repo, makeThrowingCache());
 
-      await expect(service.create({ originalUrl: 'https://example.com' })).resolves.toBeTruthy();
-      await expect(service.delete('aB3xK9q')).resolves.toBe(deletedAt);
+      await expect(service.create({ originalUrl: 'https://example.com' }, OWNER)).resolves.toBeTruthy();
+      await expect(service.delete('aB3xK9q', OWNER)).resolves.toBe(deletedAt);
     });
+  });
+});
+
+describe('DefaultUrlService ownership (anti-enumeration)', () => {
+  const STRANGER = 8n;
+  let repo: ReturnType<typeof makeRepo>;
+  let service: DefaultUrlService;
+
+  beforeEach(() => {
+    repo = makeRepo();
+    service = new DefaultUrlService(repo);
+  });
+
+  it("getMetadata hides another owner's link as a plain 404", async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ createdBy: OWNER }));
+
+    await expect(service.getMetadata('aB3xK9q', STRANGER)).rejects.toThrow(UrlNotFoundError);
+  });
+
+  it("delete refuses another owner's link without touching it", async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ createdBy: OWNER }));
+
+    await expect(service.delete('aB3xK9q', STRANGER)).rejects.toThrow(UrlNotFoundError);
+    expect(repo.softDelete).not.toHaveBeenCalled();
+  });
+
+  it('list is always scoped to the requesting owner', async () => {
+    repo.list.mockResolvedValue([]);
+
+    await service.list({ limit: 20 }, STRANGER);
+
+    expect(repo.list).toHaveBeenCalledWith({ createdBy: STRANGER, limit: 21, before: undefined });
+  });
+
+  it('redirect resolution stays ownerless (public plane)', async () => {
+    const url = makeUrl({ createdBy: OWNER });
+    repo.findByShortCode.mockResolvedValue(url);
+
+    await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
+  });
+
+  it("update refuses another owner's link without touching it", async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ createdBy: OWNER }));
+
+    await expect(service.update('aB3xK9q', { isActive: false }, STRANGER)).rejects.toThrow(
+      UrlNotFoundError,
+    );
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('DefaultUrlService.update (edit links, partial updates)', () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let cache: RedirectCache;
+  let service: DefaultUrlService;
+
+  beforeEach(() => {
+    repo = makeRepo();
+    cache = { get: vi.fn(), set: vi.fn(), setNegative: vi.fn(), del: vi.fn() };
+    service = new DefaultUrlService(repo, cache);
+  });
+
+  it('throws UrlNotFoundError for a missing short code without writing', async () => {
+    repo.findByShortCode.mockResolvedValue(null);
+
+    await expect(service.update('nope123', { isActive: false }, OWNER)).rejects.toThrow(
+      UrlNotFoundError,
+    );
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('patches only the provided fields (partial update)', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockImplementation(async (_id, patch) => makeUrl({ id: 9n, ...patch }));
+
+    await service.update('aB3xK9q', { isActive: false }, OWNER);
+
+    expect(repo.update).toHaveBeenCalledWith(9n, { isActive: false });
+  });
+
+  it('re-normalizes and re-hashes the destination when originalUrl changes', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockImplementation(async (_id, patch) => makeUrl({ id: 9n, ...patch }));
+
+    await service.update('aB3xK9q', { originalUrl: 'https://Example.COM/New' }, OWNER);
+
+    const patch = repo.update.mock.calls[0][1];
+    expect(patch.originalUrl).toBe('https://example.com/New');
+    expect(patch.urlHash).toBe(sha256('https://example.com/New'));
+  });
+
+  it('expiresAt: passes a value through, and explicit null clears it', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockImplementation(async (_id, patch) => makeUrl({ id: 9n, ...patch }));
+    const expiresAt = new Date('2030-01-01T00:00:00Z');
+
+    await service.update('aB3xK9q', { expiresAt }, OWNER);
+    expect(repo.update).toHaveBeenLastCalledWith(9n, { expiresAt });
+
+    await service.update('aB3xK9q', { expiresAt: null }, OWNER);
+    expect(repo.update).toHaveBeenLastCalledWith(9n, { expiresAt: null });
+  });
+
+  it('maxClicks: passes a value through, and explicit null clears it', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockImplementation(async (_id, patch) => makeUrl({ id: 9n, ...patch }));
+
+    await service.update('aB3xK9q', { maxClicks: 100 }, OWNER);
+    expect(repo.update).toHaveBeenLastCalledWith(9n, { maxClicks: 100 });
+
+    await service.update('aB3xK9q', { maxClicks: null }, OWNER);
+    expect(repo.update).toHaveBeenLastCalledWith(9n, { maxClicks: null });
+  });
+
+  it('password: hashes a provided value, and explicit null removes it', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockImplementation(async (_id, patch) => makeUrl({ id: 9n, ...patch }));
+
+    await service.update('aB3xK9q', { password: 'gate-1234' }, OWNER);
+    const setPatch = repo.update.mock.calls[0][1];
+    expect(setPatch.passwordHash).toMatch(/^\$2b\$/);
+    expect(setPatch.passwordHash).not.toContain('gate-1234');
+
+    await service.update('aB3xK9q', { password: null }, OWNER);
+    expect(repo.update).toHaveBeenLastCalledWith(9n, { passwordHash: null });
+  });
+
+  it('omitted fields never appear in the repository patch', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockResolvedValue(makeUrl({ id: 9n }));
+
+    await service.update('aB3xK9q', {}, OWNER);
+
+    expect(repo.update).toHaveBeenCalledWith(9n, {});
+  });
+
+  it('invalidates the cache entry after a successful update', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockResolvedValue(makeUrl({ id: 9n, isActive: false }));
+
+    await service.update('aB3xK9q', { isActive: false }, OWNER);
+
+    expect(cache.del).toHaveBeenCalledWith('aB3xK9q');
+  });
+
+  it('throws UrlNotFoundError if the row was deleted between find and write', async () => {
+    repo.findByShortCode.mockResolvedValue(makeUrl({ id: 9n }));
+    repo.update.mockResolvedValue(null);
+
+    await expect(service.update('aB3xK9q', { isActive: false }, OWNER)).rejects.toThrow(
+      UrlNotFoundError,
+    );
+  });
+});
+
+describe('DefaultUrlService.getByShortCode — password protection', () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let service: DefaultUrlService;
+
+  beforeEach(() => {
+    repo = makeRepo();
+    service = new DefaultUrlService(repo);
+  });
+
+  it('redirects with the correct password, and does not populate the cache', async () => {
+    const cache = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn(),
+      setNegative: vi.fn(),
+      del: vi.fn(),
+    };
+    service = new DefaultUrlService(repo, cache);
+    const passwordHash = await bcrypt.hash('correct-horse', 4);
+    repo.findByShortCode.mockResolvedValue(makeUrl({ passwordHash }));
+
+    await expect(service.getByShortCode('aB3xK9q', 'correct-horse')).resolves.toMatchObject({
+      shortCode: 'aB3xK9q',
+    });
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it('rejects with LinkPasswordRequiredError when no password is provided', async () => {
+    const passwordHash = await bcrypt.hash('correct-horse', 4);
+    repo.findByShortCode.mockResolvedValue(makeUrl({ passwordHash }));
+
+    await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(LinkPasswordRequiredError);
+  });
+
+  it('rejects with the SAME error for a wrong password (no distinguishing signal)', async () => {
+    const passwordHash = await bcrypt.hash('correct-horse', 4);
+    repo.findByShortCode.mockResolvedValue(makeUrl({ passwordHash }));
+
+    const missing = await service.getByShortCode('aB3xK9q').catch((e) => e);
+    const wrong = await service.getByShortCode('aB3xK9q', 'wrong-guess').catch((e) => e);
+
+    expect(missing).toBeInstanceOf(LinkPasswordRequiredError);
+    expect(wrong).toBeInstanceOf(LinkPasswordRequiredError);
+    expect(missing.message).toBe(wrong.message);
+  });
+
+  it('never counts a failed password attempt as a click', async () => {
+    const passwordHash = await bcrypt.hash('correct-horse', 4);
+    repo.findByShortCode.mockResolvedValue(makeUrl({ passwordHash }));
+
+    await service.getByShortCode('aB3xK9q', 'wrong-guess').catch(() => undefined);
+
+    expect(repo.incrementClickCount).not.toHaveBeenCalled();
+  });
+
+  it('an inactive password-protected link 404s before ever checking the password', async () => {
+    const passwordHash = await bcrypt.hash('correct-horse', 4);
+    repo.findByShortCode.mockResolvedValue(makeUrl({ passwordHash, isActive: false }));
+
+    await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+  });
+});
+
+describe('DefaultUrlService.getByShortCode — click-limit expiration', () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let cache: RedirectCache;
+  let service: DefaultUrlService;
+
+  beforeEach(() => {
+    repo = makeRepo();
+    cache = { get: vi.fn().mockResolvedValue(null), set: vi.fn(), setNegative: vi.fn(), del: vi.fn() };
+    service = new DefaultUrlService(repo, cache);
+  });
+
+  it('redirects while under the limit, atomically incrementing (not the approximate counter)', async () => {
+    const url = makeUrl({ maxClicks: 10, clickCount: 3n });
+    repo.findByShortCode.mockResolvedValue(url);
+    repo.incrementIfUnderClickLimit.mockResolvedValue(true);
+
+    await expect(service.getByShortCode('aB3xK9q')).resolves.toBe(url);
+
+    expect(repo.incrementIfUnderClickLimit).toHaveBeenCalledWith(url.id, 10);
+    expect(repo.incrementClickCount).not.toHaveBeenCalled();
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it('404s once the pre-check sees the limit already reached — no atomic call made', async () => {
+    const url = makeUrl({ maxClicks: 10, clickCount: 10n });
+    repo.findByShortCode.mockResolvedValue(url);
+
+    await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+    expect(repo.incrementIfUnderClickLimit).not.toHaveBeenCalled();
+  });
+
+  it('404s when the atomic increment loses a race, even though the pre-check passed', async () => {
+    const url = makeUrl({ maxClicks: 10, clickCount: 9n });
+    repo.findByShortCode.mockResolvedValue(url);
+    repo.incrementIfUnderClickLimit.mockResolvedValue(false);
+
+    await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+  });
+
+  it('analytics remain historically available for a click-exhausted link', async () => {
+    // getMetadata / analytics both read the raw row regardless of exhaustion —
+    // click-limit rules apply only to the redirect decision.
+    const url = makeUrl({ maxClicks: 1, clickCount: 1n });
+    repo.findByShortCode.mockResolvedValue(url);
+
+    await expect(service.getByShortCode('aB3xK9q')).rejects.toThrow(UrlNotFoundError);
+    await expect(service.getMetadata('aB3xK9q', OWNER)).resolves.toBe(url);
+  });
+});
+
+describe('DefaultUrlService.diagnoseDeadLink', () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let service: DefaultUrlService;
+
+  beforeEach(() => {
+    repo = makeRepo();
+    service = new DefaultUrlService(repo);
+  });
+
+  it('reports "not-found" when no row exists at all, even including deleted', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(null);
+
+    await expect(service.diagnoseDeadLink('ghost')).resolves.toBe('not-found');
+  });
+
+  it('reports "deleted" for a soft-deleted (tombstoned) row', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(
+      makeUrl({ deletedAt: new Date('2026-01-01T00:00:00Z') }),
+    );
+
+    await expect(service.diagnoseDeadLink('aB3xK9q')).resolves.toBe('deleted');
+  });
+
+  it('reports "not-found" (not a distinct "disabled" bucket) for a manually deactivated link', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(makeUrl({ isActive: false }));
+
+    await expect(service.diagnoseDeadLink('aB3xK9q')).resolves.toBe('not-found');
+  });
+
+  it('reports "expired" for a time-expired, still-active link', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(
+      makeUrl({ expiresAt: new Date('2020-01-01T00:00:00Z') }),
+    );
+
+    await expect(service.diagnoseDeadLink('aB3xK9q')).resolves.toBe('expired');
+  });
+
+  it('reports "limit-reached" for a click-exhausted, still-active, unexpired link', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(
+      makeUrl({ maxClicks: 5, clickCount: 5n }),
+    );
+
+    await expect(service.diagnoseDeadLink('aB3xK9q')).resolves.toBe('limit-reached');
+  });
+
+  it('deletion takes priority over expiry/click-limit when a tombstoned row also looks expired', async () => {
+    repo.findByShortCodeIncludingDeleted.mockResolvedValue(
+      makeUrl({
+        deletedAt: new Date('2026-01-01T00:00:00Z'),
+        expiresAt: new Date('2020-01-01T00:00:00Z'),
+      }),
+    );
+
+    await expect(service.diagnoseDeadLink('aB3xK9q')).resolves.toBe('deleted');
   });
 });

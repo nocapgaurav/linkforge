@@ -1,4 +1,3 @@
-import { prisma } from '../../config/prisma.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/client.js';
 import {
   ShortCodeConflictError,
@@ -36,13 +35,18 @@ export interface UrlRepository {
   findById(id: bigint): Promise<Url | null>;
 
   /**
-   * Keyset-paginated listing of live rows, newest first
+   * Keyset-paginated listing of one owner's live rows, newest first
    * (created_at DESC, id DESC — id breaks same-millisecond ties). `before`
    * is the exclusive keyset position; rows strictly after it in sort order
-   * are returned. Soft-deleted rows are excluded. Returns exactly the rows
-   * asked for — page-size math (hasMore, cursors) is the caller's concern.
+   * are returned. Soft-deleted rows are excluded. The owner filter is a
+   * query parameter — WHICH owner may ask is the service's business rule.
+   * Returns exactly the rows asked for — page-size math is the caller's.
    */
-  list(options: { limit: number; before?: { createdAt: Date; id: bigint } }): Promise<Url[]>;
+  list(options: {
+    createdBy: bigint;
+    limit: number;
+    before?: { createdAt: Date; id: bigint };
+  }): Promise<Url[]>;
 
   /**
    * Apply a partial update to a live URL row and return the updated row,
@@ -58,12 +62,32 @@ export interface UrlRepository {
   incrementClickCount(id: bigint): Promise<void>;
 
   /**
+   * Exact, race-free enforcement of a click-limit expiration: increments
+   * clickCount only if it is still below maxClicks, in one atomic
+   * statement. Returns true if this call performed the increment (the
+   * redirect is allowed), false if the limit was already reached — by this
+   * row's own history or by a concurrent request that won the race.
+   * Deliberately separate from incrementClickCount: that counter is an
+   * approximate display value; a hard limit must not inherit its slack.
+   */
+  incrementIfUnderClickLimit(id: bigint, maxClicks: number): Promise<boolean>;
+
+  /**
    * Tombstone a URL by setting deletedAt. The row (and its short code) is
    * retained forever so codes are never recycled. Idempotent: returns the
    * tombstone timestamp if a live row was deleted, null if it was already
    * gone.
    */
   softDelete(id: bigint): Promise<Date | null>;
+
+  /**
+   * Look up a URL by short code WITHOUT hiding soft-deleted rows. Used only
+   * to diagnose why an already-confirmed-dead redirect is dead (never
+   * existed vs. tombstoned vs. expired vs. click-exhausted), so a browser
+   * can be sent to a specific "gone" page. Never used to decide whether a
+   * redirect is allowed — that remains findByShortCode's job.
+   */
+  findByShortCodeIncludingDeleted(shortCode: string): Promise<Url | null>;
 }
 
 const UNIQUE_VIOLATION = 'P2002';
@@ -105,10 +129,15 @@ export class PrismaUrlRepository implements UrlRepository {
     return this.db.url.findFirst({ where: { id, ...notDeleted } });
   }
 
-  list(options: { limit: number; before?: { createdAt: Date; id: bigint } }): Promise<Url[]> {
-    const { limit, before } = options;
+  list(options: {
+    createdBy: bigint;
+    limit: number;
+    before?: { createdAt: Date; id: bigint };
+  }): Promise<Url[]> {
+    const { createdBy, limit, before } = options;
     return this.db.url.findMany({
       where: {
+        createdBy,
         ...notDeleted,
         // Keyset predicate: (created_at, id) < (before.createdAt, before.id)
         // in DESC order — strictly older, or same instant with a smaller id.
@@ -147,6 +176,18 @@ export class PrismaUrlRepository implements UrlRepository {
     });
   }
 
+  async incrementIfUnderClickLimit(id: bigint, maxClicks: number): Promise<boolean> {
+    // The WHERE and the increment happen as one statement, so Postgres's
+    // per-row locking makes this race-free across concurrent requests:
+    // only a request that still sees clickCount < maxClicks at write time
+    // can succeed, and only one of two concurrent last-slot requests wins.
+    const result = await this.db.url.updateMany({
+      where: { id, ...notDeleted, clickCount: { lt: BigInt(maxClicks) } },
+      data: { clickCount: { increment: 1 } },
+    });
+    return result.count > 0;
+  }
+
   async softDelete(id: bigint): Promise<Date | null> {
     const deletedAt = new Date();
     const result = await this.db.url.updateMany({
@@ -155,7 +196,8 @@ export class PrismaUrlRepository implements UrlRepository {
     });
     return result.count > 0 ? deletedAt : null;
   }
-}
 
-/** Application-wide repository instance wired to the shared Prisma client. */
-export const urlRepository: UrlRepository = new PrismaUrlRepository(prisma);
+  findByShortCodeIncludingDeleted(shortCode: string): Promise<Url | null> {
+    return this.db.url.findFirst({ where: { shortCode } });
+  }
+}

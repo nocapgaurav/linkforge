@@ -1,8 +1,11 @@
 import type { NextFunction, Request, Response } from 'express';
+import { InvalidCredentialsError, UnauthorizedError } from '../../modules/auth/auth.errors.js';
 import {
   AliasAlreadyExistsError,
+  LinkPasswordRequiredError,
   UrlNotFoundError,
 } from '../../modules/url/url.errors.js';
+import { EmailTakenError } from '../../modules/user/user.types.js';
 import type { ValidationFailure } from '../../utils/validation.js';
 import { errorEnvelope, fail } from './response.js';
 
@@ -63,6 +66,22 @@ export function errorHandler(
   }
   if (error instanceof AliasAlreadyExistsError) {
     fail(res, 409, 'ALIAS_TAKEN', error.message);
+    return;
+  }
+  if (error instanceof LinkPasswordRequiredError) {
+    fail(res, 401, 'PASSWORD_REQUIRED', error.message);
+    return;
+  }
+  if (error instanceof InvalidCredentialsError) {
+    fail(res, 401, 'INVALID_CREDENTIALS', error.message);
+    return;
+  }
+  if (error instanceof UnauthorizedError) {
+    fail(res, 401, 'UNAUTHORIZED', error.message);
+    return;
+  }
+  if (error instanceof EmailTakenError) {
+    fail(res, 409, 'EMAIL_TAKEN', error.message);
     return;
   }
   if (error instanceof Error && isJsonParseError(error)) {

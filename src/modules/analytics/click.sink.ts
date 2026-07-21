@@ -1,5 +1,4 @@
-import { env } from '../../config/env.js';
-import { clickRepository, type ClickRepository } from './click.repository.js';
+import { type ClickRepository } from './click.repository.js';
 import type { NewClickEvent } from './click.types.js';
 
 /**
@@ -58,11 +57,3 @@ export class DatabaseClickSink implements ClickSink {
     }
   }
 }
-
-/**
- * Composition: database-backed when analytics is enabled, no-op otherwise.
- * Consumed by the redirect flow in the next phase.
- */
-export const clickSink: ClickSink = env.analyticsEnabled
-  ? new DatabaseClickSink(clickRepository)
-  : new NullClickSink();

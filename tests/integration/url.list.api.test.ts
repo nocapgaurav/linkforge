@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import app from '../../src/app';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
 import { disconnectRedis } from '../../src/config/redis';
-import { urlRepository } from '../../src/modules/url/url.repository';
+import { urlRepository } from '../../src/composition';
+import { registerTestUser } from './helpers';
 
 /**
  * Listing tests against the real stack. Fixture rows are backdated into a
@@ -16,10 +17,14 @@ const WINDOW_TOP = Date.UTC(2001, 5, 15); // fixture window: June 2001
 const stamp = Date.now().toString(36);
 const fixtureCode = (n: number) => `lst${n}${stamp}`;
 const fixtureIds: bigint[] = [];
+let auth: Awaited<ReturnType<typeof registerTestUser>>;
+let ownerId: bigint;
 /** Cursor pointing just above the fixture window. */
 const windowCursor = `${WINDOW_TOP + 60_000}_999999999`;
 
 beforeAll(async () => {
+  auth = await registerTestUser(app);
+  ownerId = (await prisma.user.findUniqueOrThrow({ where: { email: auth.email } })).id;
   // Five links, one minute apart, oldest first — plus two sharing one
   // timestamp (codes 4 and 5) to exercise the id tiebreak.
   for (let n = 1; n <= 5; n++) {
@@ -29,6 +34,7 @@ beforeAll(async () => {
         shortCode: fixtureCode(n),
         originalUrl: `https://example.com/list-${n}`,
         urlHash: 'e'.repeat(64),
+        createdBy: ownerId,
         createdAt,
       },
     });
@@ -38,6 +44,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.url.deleteMany({ where: { id: { in: fixtureIds } } });
+  await prisma.user.deleteMany({ where: { email: auth.email } });
   await disconnectRedis();
   await disconnectPrisma();
 });
@@ -45,6 +52,7 @@ afterAll(async () => {
 describe('UrlRepository.list', () => {
   it('orders by created_at DESC with id DESC breaking timestamp ties', async () => {
     const rows = await urlRepository.list({
+      createdBy: ownerId,
       limit: 10,
       before: { createdAt: new Date(WINDOW_TOP + 60_000), id: 999_999_999n },
     });
@@ -59,6 +67,7 @@ describe('UrlRepository.list', () => {
 
   it('applies the keyset predicate exclusively (row at the cursor is skipped)', async () => {
     const all = await urlRepository.list({
+      createdBy: ownerId,
       limit: 10,
       before: { createdAt: new Date(WINDOW_TOP), id: 999_999_999n },
     });
@@ -66,6 +75,7 @@ describe('UrlRepository.list', () => {
     const second = mine[1];
 
     const after = await urlRepository.list({
+      createdBy: ownerId,
       limit: 10,
       before: { createdAt: second.createdAt, id: second.id },
     });
@@ -75,12 +85,13 @@ describe('UrlRepository.list', () => {
   });
 
   it('respects the limit', async () => {
-    const rows = await urlRepository.list({ limit: 2 });
+    const rows = await urlRepository.list({ createdBy: ownerId, limit: 2 });
     expect(rows.length).toBeLessThanOrEqual(2);
   });
 
   it('returns an empty page when the cursor is older than every row', async () => {
     const rows = await urlRepository.list({
+      createdBy: ownerId,
       limit: 10,
       before: { createdAt: new Date(1000), id: 1n },
     });
@@ -90,7 +101,7 @@ describe('UrlRepository.list', () => {
 
 describe('GET /api/v1/urls', () => {
   it('returns the documented envelope shape with URL resources', async () => {
-    const response = await request(app).get('/api/v1/urls?limit=5');
+    const response = await request(app).get('/api/v1/urls?limit=5').set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
@@ -113,7 +124,7 @@ describe('GET /api/v1/urls', () => {
     while (cursor !== null && pages < 20) {
       const response = await request(app).get(
         `/api/v1/urls?limit=2&cursor=${encodeURIComponent(cursor)}`,
-      );
+      ).set('Authorization', `Bearer ${auth.accessToken}`);
       expect(response.status).toBe(200);
       const { items, pagination } = response.body.data;
       expect(items.length).toBeLessThanOrEqual(2);
@@ -129,11 +140,11 @@ describe('GET /api/v1/urls', () => {
   });
 
   it('excludes soft-deleted links from listings', async () => {
-    await request(app).delete(`/api/v1/urls/${fixtureCode(3)}`).expect(200);
+    await request(app).delete(`/api/v1/urls/${fixtureCode(3)}`).set('Authorization', `Bearer ${auth.accessToken}`).expect(200);
 
     const response = await request(app).get(
       `/api/v1/urls?limit=100&cursor=${encodeURIComponent(windowCursor)}`,
-    );
+    ).set('Authorization', `Bearer ${auth.accessToken}`);
     const mine = response.body.data.items
       .map((i: { shortCode: string }) => i.shortCode)
       .filter((code: string) => code.endsWith(stamp));
@@ -142,7 +153,7 @@ describe('GET /api/v1/urls', () => {
   });
 
   it('returns an empty page for a cursor older than every row', async () => {
-    const response = await request(app).get('/api/v1/urls?cursor=1000_1');
+    const response = await request(app).get('/api/v1/urls?cursor=1000_1').set('Authorization', `Bearer ${auth.accessToken}`);
 
     expect(response.status).toBe(200);
     expect(response.body.data).toEqual({
@@ -153,7 +164,7 @@ describe('GET /api/v1/urls', () => {
 
   it('rejects invalid limits and malformed cursors with 400', async () => {
     for (const query of ['limit=0', 'limit=101', 'limit=abc', 'cursor=garbage', 'cursor=12_x']) {
-      const response = await request(app).get(`/api/v1/urls?${query}`);
+      const response = await request(app).get(`/api/v1/urls?${query}`).set('Authorization', `Bearer ${auth.accessToken}`);
       expect(response.status, query).toBe(400);
       expect(response.body.error.code).toBe('VALIDATION_ERROR');
     }
@@ -169,13 +180,13 @@ describe('GET /api/v1/urls', () => {
     expect(preflight.headers['access-control-allow-methods']).toContain('GET');
 
     const allowed = await request(app)
-      .get('/api/v1/urls?limit=1')
+      .get('/api/v1/urls?limit=1').set('Authorization', `Bearer ${auth.accessToken}`)
       .set('Origin', 'http://localhost:3001');
     expect(allowed.headers['access-control-allow-origin']).toBe('http://localhost:3001');
     expect(allowed.headers['vary']).toContain('Origin');
 
     const denied = await request(app)
-      .get('/api/v1/urls?limit=1')
+      .get('/api/v1/urls?limit=1').set('Authorization', `Bearer ${auth.accessToken}`)
       .set('Origin', 'https://evil.example');
     expect(denied.headers['access-control-allow-origin']).toBeUndefined();
   });

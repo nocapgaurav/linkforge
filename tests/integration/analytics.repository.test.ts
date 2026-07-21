@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { disconnectPrisma, prisma } from '../../src/config/prisma';
-import { analyticsRepository } from '../../src/modules/analytics/analytics.repository';
+import { analyticsRepository } from '../../src/composition';
 
 /**
  * Aggregation queries against real Postgres. One url with a fixed event
@@ -12,6 +12,7 @@ const DAY_MS = 86_400_000;
 const now = new Date();
 const ago = (days: number, extraMs = 0) => new Date(now.getTime() - days * DAY_MS - extraMs);
 
+let ownerId: bigint;
 let urlId: bigint;
 let otherUrlId: bigint;
 
@@ -26,6 +27,14 @@ async function seed(
 }
 
 beforeAll(async () => {
+  const owner = await prisma.user.create({
+    data: {
+      email: `repo-${randomUUID()}@test.linkforge.local`,
+      displayName: 'Repo Fixture',
+      passwordHash: 'x'.repeat(60),
+    },
+  });
+  ownerId = owner.id;
   const [a, b] = await Promise.all(
     ['ana', 'anb'].map((prefix) =>
       prisma.url.create({
@@ -33,6 +42,7 @@ beforeAll(async () => {
           shortCode: `${prefix}${Date.now().toString(36)}`,
           originalUrl: 'https://example.com/analytics',
           urlHash: 'd'.repeat(64),
+          createdBy: ownerId,
         },
       }),
     ),
@@ -52,6 +62,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.clickEvent.deleteMany({ where: { urlId: { in: [urlId, otherUrlId] } } });
   await prisma.url.deleteMany({ where: { id: { in: [urlId, otherUrlId] } } });
+  await prisma.user.deleteMany({ where: { id: ownerId } });
   await disconnectPrisma();
 });
 

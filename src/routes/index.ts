@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { analyticsRouter } from '../modules/analytics/analytics.routes.js';
+import { authenticate } from '../modules/auth/auth.middleware.js';
+import { authRouter } from '../modules/auth/auth.routes.js';
 import { urlRouter } from '../modules/url/url.routes.js';
 
 /** Liveness probe, mounted at the domain root ahead of all other routes. */
@@ -15,6 +17,10 @@ healthRouter.get('/health', (_req, res) => {
  * without touching existing routes.
  */
 const v1Router = Router();
+v1Router.use('/auth', authRouter);
+// One gate for the whole management plane (link CRUD + analytics). The
+// public redirect lives at the domain root and never passes through here.
+v1Router.use('/urls', authenticate);
 v1Router.use('/urls', urlRouter);
 v1Router.use('/urls', analyticsRouter);
 

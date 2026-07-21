@@ -2,8 +2,8 @@ import type { RequestHandler } from 'express';
 import { asyncHandler } from '../../shared/http/async-handler.js';
 import { RequestValidationError } from '../../shared/http/error-handler.js';
 import { success } from '../../shared/http/response.js';
+import { requireUser } from '../auth/auth.middleware.js';
 import { validateShortCodeParams } from '../url/url.validation.js';
-import { analyticsService } from './analytics.service.js';
 import type { AnalyticsService } from './analytics.service.js';
 import { validateAnalyticsQuery } from './analytics.validation.js';
 
@@ -20,11 +20,12 @@ export function createAnalyticsController(service: AnalyticsService): AnalyticsC
       if (!params.success) throw new RequestValidationError(params);
       const query = validateAnalyticsQuery(req.query);
       if (!query.success) throw new RequestValidationError(query);
-      const analytics = await service.getUrlAnalytics(params.data.shortCode, query.data);
+      const analytics = await service.getUrlAnalytics(
+        params.data.shortCode,
+        query.data,
+        requireUser(req).id,
+      );
       success(res, analytics);
     }),
   };
 }
-
-/** Application-wide controller wired to the real AnalyticsService. */
-export const analyticsController = createAnalyticsController(analyticsService);

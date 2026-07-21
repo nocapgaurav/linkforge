@@ -1,7 +1,6 @@
 import { UrlNotFoundError } from '../url/url.errors.js';
-import { urlRepository, type UrlRepository } from '../url/url.repository.js';
+import { type UrlRepository } from '../url/url.repository.js';
 import {
-  analyticsRepository,
   type AnalyticsRange,
   type AnalyticsRepository,
   type AnalyticsSummary,
@@ -21,12 +20,17 @@ export interface UrlAnalytics {
 
 export interface AnalyticsService {
   /**
-   * Assemble the analytics read model for a link. Orchestration only:
-   * resolves the link (soft-deleted/unknown → UrlNotFoundError, matching
-   * the management plane), fans out the aggregation queries concurrently,
-   * and zero-fills the time series so charts never gap-fill client-side.
+   * Assemble the analytics read model for one of the owner's links.
+   * Orchestration only: resolves the link (unknown, soft-deleted, AND
+   * other-owner codes all → UrlNotFoundError — the anti-enumeration rule),
+   * fans out the aggregation queries concurrently, and zero-fills the
+   * time series so charts never gap-fill client-side.
    */
-  getUrlAnalytics(shortCode: string, query: AnalyticsQuery): Promise<UrlAnalytics>;
+  getUrlAnalytics(
+    shortCode: string,
+    query: AnalyticsQuery,
+    ownerId: bigint,
+  ): Promise<UrlAnalytics>;
 }
 
 const DAY_MS = 86_400_000;
@@ -91,9 +95,14 @@ export class DefaultAnalyticsService implements AnalyticsService {
     private readonly analytics: AnalyticsRepository,
   ) {}
 
-  async getUrlAnalytics(shortCode: string, query: AnalyticsQuery): Promise<UrlAnalytics> {
+  async getUrlAnalytics(
+    shortCode: string,
+    query: AnalyticsQuery,
+    ownerId: bigint,
+  ): Promise<UrlAnalytics> {
     const url = await this.urls.findByShortCode(shortCode);
-    if (!url) {
+    if (!url || url.createdBy !== ownerId) {
+      // Other-owner links look exactly like missing ones (anti-enumeration).
       throw new UrlNotFoundError(shortCode);
     }
 
@@ -117,9 +126,3 @@ export class DefaultAnalyticsService implements AnalyticsService {
     };
   }
 }
-
-/** Application-wide service wired to the real repositories. */
-export const analyticsService: AnalyticsService = new DefaultAnalyticsService(
-  urlRepository,
-  analyticsRepository,
-);

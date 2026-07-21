@@ -1,19 +1,24 @@
 import type { Metadata } from 'next';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { PageHeader } from '@/components/common/PageHeader';
-import { Card, CardContent } from '@/components/ui/card';
+import { ChangePasswordCard } from '@/components/settings/ChangePasswordCard';
+import { DeleteAccountCard } from '@/components/settings/DeleteAccountCard';
+import { ProfileCard } from '@/components/settings/ProfileCard';
+import { SessionsCard } from '@/components/settings/SessionsCard';
 
 export const metadata: Metadata = { title: 'Settings' };
 
+/** Pure composition — all behavior lives in the section components. */
 export default function SettingsPage() {
   return (
     <DashboardLayout>
-      <PageHeader title="Settings" description="Manage your workspace preferences." />
-      <Card>
-        <CardContent className="py-10 text-center text-sm text-muted-foreground">
-          Settings will appear here in an upcoming sprint.
-        </CardContent>
-      </Card>
+      <PageHeader title="Settings" description="Manage your account." />
+      <div className="space-y-6">
+        <ProfileCard />
+        <ChangePasswordCard />
+        <SessionsCard />
+        <DeleteAccountCard />
+      </div>
     </DashboardLayout>
   );
 }

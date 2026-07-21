@@ -1,4 +1,3 @@
-import { prisma } from '../../config/prisma.js';
 import type { PrismaClient } from '../../generated/prisma/client.js';
 import type { AnalyticsInterval } from './analytics.validation.js';
 
@@ -132,6 +131,3 @@ export class PrismaAnalyticsRepository implements AnalyticsRepository {
     return { urlId: range.urlId, occurredAt: { gte: range.from, lt: range.to } };
   }
 }
-
-/** Application-wide instance wired to the shared Prisma client. */
-export const analyticsRepository: AnalyticsRepository = new PrismaAnalyticsRepository(prisma);

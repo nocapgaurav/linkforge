@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import { Toaster } from 'sonner';
+import { AuthProvider } from '@/lib/auth/AuthProvider';
 import { QueryProvider } from '@/lib/providers/QueryProvider';
 import { ThemeProvider } from '@/lib/providers/ThemeProvider';
 import '@/styles/globals.css';
@@ -32,8 +33,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className="antialiased">
         <ThemeProvider>
           <QueryProvider>
-            {children}
-            <Toaster position="top-right" richColors />
+            <AuthProvider>
+              {children}
+              <Toaster position="top-right" richColors />
+            </AuthProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>

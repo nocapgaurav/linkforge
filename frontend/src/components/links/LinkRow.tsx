@@ -4,6 +4,7 @@ import { BarChart3, ExternalLink } from 'lucide-react';
 import NextLink from 'next/link';
 import { CopyButton } from '@/components/links/CopyButton';
 import { DeleteLinkDialog } from '@/components/links/DeleteLinkDialog';
+import { EditLinkDialog } from '@/components/links/EditLinkDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TableCell, TableRow } from '@/components/ui/table';
@@ -14,10 +15,21 @@ import type { Link } from '@/types/link';
 const numberFormat = new Intl.NumberFormat('en-US');
 const dateFormat = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium' });
 
-function linkStatus(link: Link): { label: string; variant: 'default' | 'secondary' | 'destructive' } {
-  if (!link.isActive) return { label: 'Inactive', variant: 'secondary' };
+/**
+ * Precedence mirrors the backend's own redirect gate order (isActive →
+ * expiry → click-limit — see url.service.ts's getByShortCode), so a link
+ * that's dead for more than one reason still shows the same status a
+ * visitor's redirect attempt would actually hit.
+ */
+function linkStatus(
+  link: Link,
+): { label: string; variant: 'default' | 'secondary' | 'destructive' } {
+  if (!link.isActive) return { label: 'Disabled', variant: 'secondary' };
   if (link.expiresAt && Date.parse(link.expiresAt) <= Date.now()) {
     return { label: 'Expired', variant: 'destructive' };
+  }
+  if (link.maxClicks !== null && link.clickCount >= link.maxClicks) {
+    return { label: 'Click Limit Reached', variant: 'destructive' };
   }
   return { label: 'Active', variant: 'default' };
 }
@@ -59,6 +71,7 @@ function LinkActions({ link }: { link: Link }) {
       >
         <ExternalLink className="size-4" aria-hidden="true" />
       </Button>
+      <EditLinkDialog link={link} />
       <DeleteLinkDialog shortCode={link.shortCode} />
     </div>
   );

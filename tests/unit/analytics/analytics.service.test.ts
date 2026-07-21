@@ -15,10 +15,12 @@ const url: Url = {
   clickCount: 0n,
   isActive: true,
   expiresAt: null,
-  createdBy: null,
+  createdBy: 7n,
   createdAt: new Date('2026-01-01T00:00:00Z'),
   updatedAt: new Date('2026-01-01T00:00:00Z'),
   deletedAt: null,
+  passwordHash: null,
+  maxClicks: null,
 };
 
 const summary = { totalClicks: 10, today: 1, last7Days: 4, last30Days: 9 };
@@ -61,7 +63,7 @@ describe('DefaultAnalyticsService', () => {
   it('throws UrlNotFoundError for unknown (or soft-deleted) codes without querying analytics', async () => {
     const service = new DefaultAnalyticsService(makeUrls(null), analytics);
 
-    await expect(service.getUrlAnalytics('nope123', query)).rejects.toThrow(UrlNotFoundError);
+    await expect(service.getUrlAnalytics('nope123', query, 7n)).rejects.toThrow(UrlNotFoundError);
     expect(analytics.summary).not.toHaveBeenCalled();
     expect(analytics.series).not.toHaveBeenCalled();
   });
@@ -71,7 +73,7 @@ describe('DefaultAnalyticsService', () => {
     analytics.browserBreakdown.mockResolvedValue(browsers);
     const service = new DefaultAnalyticsService(makeUrls(), analytics);
 
-    const result = await service.getUrlAnalytics('aB3xK9q', query);
+    const result = await service.getUrlAnalytics('aB3xK9q', query, 7n);
 
     const range = { urlId: 42n, from: query.from, to: query.to };
     expect(analytics.summary).toHaveBeenCalledWith(42n);
@@ -87,7 +89,7 @@ describe('DefaultAnalyticsService', () => {
     analytics.series.mockResolvedValue([{ date: '2026-07-05', count: 2 }]);
     const service = new DefaultAnalyticsService(makeUrls(), analytics);
 
-    const result = await service.getUrlAnalytics('aB3xK9q', query);
+    const result = await service.getUrlAnalytics('aB3xK9q', query, 7n);
 
     expect(result.series).toEqual([
       { date: '2026-07-03', count: 0 },
@@ -106,7 +108,7 @@ describe('DefaultAnalyticsService', () => {
       ...query,
       to: new Date('2026-07-14T00:00:00Z'),
       interval: 'week',
-    });
+    }, 7n);
 
     expect(result.series).toEqual([
       { date: '2026-06-29', count: 0 },
@@ -123,12 +125,21 @@ describe('DefaultAnalyticsService', () => {
       from: new Date('2026-07-15T12:00:00Z'),
       to: new Date('2026-09-02T00:00:00Z'),
       interval: 'month',
-    });
+    }, 7n);
 
     expect(result.series).toEqual([
       { date: '2026-07-01', count: 0 },
       { date: '2026-08-01', count: 7 },
       { date: '2026-09-01', count: 0 },
     ]);
+  });
+
+  it("hides another owner's link as a plain 404 without querying analytics", async () => {
+    const service = new DefaultAnalyticsService(makeUrls(), analytics);
+
+    await expect(service.getUrlAnalytics('aB3xK9q', query, 999n)).rejects.toThrow(
+      UrlNotFoundError,
+    );
+    expect(analytics.summary).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,3 @@
-import { redisClient } from '../../config/redis.js';
-
 /**
  * Redirect cache port and implementations (docs/redis-cache-design.md).
  *
@@ -168,11 +166,3 @@ export class RedisRedirectCache implements RedirectCache {
     }
   }
 }
-
-/**
- * Composition: Redis-backed when REDIS_URL is configured, no-op otherwise.
- * Consumed by the service in the next milestone.
- */
-export const redirectCache: RedirectCache = redisClient
-  ? new RedisRedirectCache(redisClient)
-  : new NullRedirectCache();

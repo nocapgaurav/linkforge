@@ -20,6 +20,10 @@ export const env = {
   analyticsEnabled: process.env.ANALYTICS_ENABLED === 'true',
   /** Optional: browser origin allowed to call the API (CORS). Unset = no CORS headers. */
   frontendOrigin: process.env.FRONTEND_ORIGIN,
+  /** HMAC secret for access tokens; the process must not boot without it. */
+  jwtSecret: required('JWT_SECRET'),
+  /** bcrypt work factor; overridable so tests can run at a cheap cost. */
+  bcryptCost: Number(process.env.BCRYPT_COST ?? 12),
   /**
    * Public origin short links are served from; used to build shortUrl.
    * Named PUBLIC_BASE_URL because plain BASE_URL is a reserved Vite/Vitest
