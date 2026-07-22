@@ -2,11 +2,13 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+  "license": "ISC",
   "scripts": {
     "dev": "next dev --turbopack -p 3001",
     "build": "next build --turbopack",
     "start": "next start -p 3001",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

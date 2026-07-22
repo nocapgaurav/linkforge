@@ -16,13 +16,18 @@ Lucide · TanStack Query · React Hook Form + Zod · Sonner · next-themes
 pnpm install
 
 # start the backend + databases (in another terminal)
-docker compose up -d --wait && pnpm dev        # backend on :3000
+pnpm db:up && pnpm dev                          # Postgres + Redis, then backend on :3000
 
 # start the frontend
 cd frontend
 cp .env.example .env.local                     # already correct for local dev
 pnpm dev                                       # frontend on :3001
 ```
+
+`pnpm db:up` starts only Postgres and Redis (not the app containers — see the
+root README) — running a bare `docker compose up` instead would also build
+and start backend/frontend containers, which then conflict on the same
+ports `pnpm dev` is about to bind.
 
 Open http://localhost:3001.
 

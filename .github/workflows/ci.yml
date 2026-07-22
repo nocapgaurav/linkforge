@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same branch/PR cancels any run still in flight for it —
+# no point burning runner time on a commit that's already been superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '11.15.0'
+
+jobs:
+  backend:
+    name: Backend (lint, typecheck, build, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      # Named to match what tests/integration/rate-limit.api.test.ts
+      # expects: it exercises Redis fail-open by literally stopping the
+      # container mid-test (`docker stop linkforge-redis`), the same real
+      # infrastructure check used locally — not a mock. Plain `docker run`
+      # instead of GitHub's `services:` block specifically so the
+      # container name matches exactly.
+      - name: Start Postgres and Redis
+        run: |
+          docker run -d --name linkforge-postgres \
+            -e POSTGRES_USER=linkforge -e POSTGRES_PASSWORD=linkforge -e POSTGRES_DB=linkforge \
+            -p 5432:5432 postgres:17-alpine
+          docker run -d --name linkforge-redis \
+            -p 6379:6379 redis:7-alpine \
+            redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save ''
+
+      - name: Wait for Postgres and Redis
+        run: |
+          for i in $(seq 1 30); do
+            docker exec linkforge-postgres pg_isready -U linkforge -d linkforge && break
+            sleep 1
+          done
+          for i in $(seq 1 30); do
+            docker exec linkforge-redis redis-cli ping && break
+            sleep 1
+          done
+
+      - name: Apply migrations
+        run: pnpm exec prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://linkforge:linkforge@localhost:5432/linkforge?schema=public
+
+      - name: Test
+        run: pnpm test
+        env:
+          DATABASE_URL: postgresql://linkforge:linkforge@localhost:5432/linkforge?schema=public
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-secret-not-for-production-use
+          NODE_ENV: test
+          PUBLIC_BASE_URL: http://localhost:3000
+          ANALYTICS_ENABLED: 'true'
+
+  frontend:
+    name: Frontend (lint, typecheck, build, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # Installed from the repo root — this is a pnpm workspace, so the
+      # lockfile at the root covers both projects.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
+      - name: Typecheck
+        working-directory: frontend
+        run: pnpm typecheck
+
+      - name: Build
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Test
+        working-directory: frontend
+        run: pnpm test

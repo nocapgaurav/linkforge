@@ -33,5 +33,60 @@ services:
       timeout: 3s
       retries: 10
 
+  # The API. DATABASE_URL/REDIS_URL below deliberately use the Docker
+  # network's service names (postgres/redis), never localhost — those two
+  # values are the only ones that differ from .env.example, since they're
+  # server-to-server calls inside the compose network. Everything else
+  # (JWT_SECRET, FRONTEND_ORIGIN, PUBLIC_BASE_URL, ...) comes from .env
+  # unchanged, because those are consumed by an actual browser on the host
+  # machine via the published ports, not by another container — a browser
+  # has never heard of a Docker service name.
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: linkforge-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://linkforge:linkforge@postgres:5432/linkforge?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  # The frontend. NEXT_PUBLIC_API_URL is a build ARG, not a runtime env var
+  # — Next.js inlines NEXT_PUBLIC_* into the client bundle at build time,
+  # so it must be browser-facing (localhost:3000) at BUILD time regardless
+  # of how the frontend container reaches the backend at runtime (which,
+  # for this app, it never needs to — it's a client-rendered SPA; every API
+  # call happens from the user's browser, not from the Next.js server).
+  frontend:
+    build:
+      # Root context, not ./frontend — this is a pnpm workspace, and the
+      # lockfile at the repo root covers both projects (see the frontend
+      # Dockerfile's own comment on this).
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3000/api/v1
+    container_name: linkforge-frontend
+    restart: unless-stopped
+    ports:
+      - '3001:3001'
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   linkforge_pgdata:

@@ -1,5 +1,13 @@
 # LinkForge — Codebase Walkthrough (v1, as of 2026-07-19)
 
+> **Historical snapshot.** This was written when LinkForge had five
+> endpoints, no auth, and no CI — the "Current project status" (§10) and
+> Summary table at the end describe that early state, not today's. The
+> layered-architecture and request-lifecycle sections above them are still
+> structurally accurate (the pattern hasn't changed, only its scope has).
+> For current state, see the root [`README.md`](../README.md) and
+> [`api-v1-spec.md`](api-v1-spec.md).
+
 Audience: a senior backend engineer joining the project. This document
 describes what exists today — no proposals, no future features. Companion
 design documents live in `docs/` (`url-entity-design.md`, `api-v1-spec.md`,

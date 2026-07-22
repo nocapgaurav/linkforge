@@ -1,0 +1,13 @@
+-- The 20260719225311_add_users_and_sessions migration seeded a demo user
+-- (demo@linkforge.local) purely as a mechanism to backfill created_by on
+-- any pre-existing anonymous urls before that column became NOT NULL. That
+-- migration is immutable (already applied everywhere it's ever run) and
+-- must not be edited retroactively, but its side effect — a demo account
+-- landing in every fresh database, including production — was never
+-- intended as an ongoing seeding strategy. Demo/local-dev data now belongs
+-- exclusively to `prisma/seed.ts`, run explicitly and only outside
+-- production. This migration removes that one historical row going
+-- forward. Safe unconditionally: the demo user was never assigned any
+-- real url ownership beyond that one-time backfill (verified empty in
+-- every environment that has run this far), so there is no FK conflict.
+DELETE FROM "users" WHERE "email" = 'demo@linkforge.local';

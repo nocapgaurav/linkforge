@@ -1,6 +1,7 @@
 # LinkForge Public REST API — Version 1 Specification
 
-Status: Implemented (all sections including §7 analytics as of 2026-07-19).
+Status: Implemented (all sections including §7 analytics as of 2026-07-19;
+account-management endpoints in §11 as of 2026-07-22).
 This document is the source of truth for the v1 HTTP layer. Frontend and
 backend teams can build against it independently. Companion documents:
 `url-entity-design.md` (storage model), `analytics-design.md` (analytics
@@ -628,6 +629,10 @@ public.
 | `POST /api/v1/auth/refresh` | `{refreshToken}` | `200` `{accessToken, refreshToken, expiresIn}` | 400, 401 |
 | `POST /api/v1/auth/logout` | `{refreshToken}` | `200` `{loggedOut: true}` (idempotent) | 400 |
 | `GET /api/v1/auth/me` | — (Bearer) | `200` `{user}` | 401 |
+| `PATCH /api/v1/auth/me` | `{displayName}` (Bearer) | `200` `{user}` | 400, 401 |
+| `PATCH /api/v1/auth/password` | `{currentPassword, newPassword}` (Bearer) | `200` `{changed: true}` | 400, 401 `INVALID_CREDENTIALS` (wrong current password) |
+| `POST /api/v1/auth/logout-all` | — (Bearer) | `200` `{loggedOut: true}` | 401 |
+| `DELETE /api/v1/auth/me` | — (Bearer) | `200` `{deleted: true}` | 401 |
 
 **The user resource**: `{email, displayName, emailVerifiedAt, createdAt}` —
 internal ids and password hashes are never exposed (same doctrine as links).
@@ -643,5 +648,20 @@ only the caller's links; metadata/delete/analytics on another owner's code
 return `404 NOT_FOUND` — not `403` — per the anti-enumeration doctrine
 (§3, §4): responses never confirm that a code exists.
 
-**Demo account**: the migration seeds `demo@linkforge.local` /
-`demo-password`, which owns all pre-auth links. Local/demo use only.
+**Account management** (implemented 2026-07-22): `PATCH /auth/me` updates
+the display name only (email is immutable). `PATCH /auth/password`
+verifies `currentPassword` first — a wrong one returns the same
+`INVALID_CREDENTIALS` shape login uses — and does **not** revoke other
+sessions; `POST /auth/logout-all` is the separate, explicit "log out of
+all devices" action for that. `DELETE /auth/me` soft-deletes the account
+(mirrors the `Url` tombstone pattern — `deletedAt`, never a hard delete)
+and revokes every session; the email stays retired permanently, exactly
+like a short code, since the same unique constraint doesn't distinguish
+`deletedAt`. A still-valid access token issued before deletion keeps
+working for its remaining ≤15-minute lifetime — accepted, since access
+tokens are stateless everywhere else in this design too.
+
+**Demo account**: seeded by `prisma/seed.ts` (`pnpm db:seed`), never by a
+migration — `demo@linkforge.local` / `demo-password`. The script refuses
+to run when `NODE_ENV=production`, so a real deployment never gets a demo
+account automatically. See the root README's "Seed data" section.
