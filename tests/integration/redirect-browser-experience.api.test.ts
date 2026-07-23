@@ -37,6 +37,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 250)); // let fire-and-forget writes settle
   await prisma.clickEvent.deleteMany({ where: { url: { shortCode: { in: createdCodes } } } });
   await prisma.url.deleteMany({ where: { shortCode: { in: createdCodes } } });
   await prisma.user.deleteMany({ where: { email: auth.email } });
