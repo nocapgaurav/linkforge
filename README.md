@@ -1,132 +1,166 @@
 # LinkForge
 
-[![CI](https://github.com/nocapgaurav/linkforge/actions/workflows/ci.yml/badge.svg)](https://github.com/nocapgaurav/linkforge/actions/workflows/ci.yml)
+LinkForge is a URL shortener with authenticated link management, per-link
+analytics, and Redis-backed caching and rate limiting. It's built as a
+full-stack app — an Express API and a Next.js dashboard — to explore how a
+small product like this is put together end to end, not just how a redirect
+works.
 
-A production-oriented URL shortener: authenticated link management, Redis-backed
-redirect caching and rate limiting, password-protected and click-limited links,
-and per-link analytics — with a Next.js dashboard on top.
+Secure links • Analytics • Redis caching • Dockerized • Fully tested
 
-```
-register → log in → create a short link → share it → open it anywhere
-  → redirect (302) → view analytics → manage the link
-```
+---
 
-## Stack
+## Features
 
-**Backend** — Node.js · Express 5 · TypeScript · PostgreSQL (via Prisma) · Redis
-**Frontend** — Next.js 15 (App Router) · TypeScript · TanStack Query · Tailwind CSS v4 · shadcn/ui
-**Engineering** — Vitest (both apps) · ESLint · GitHub Actions CI · Docker
-
-The frontend lives in [`frontend/`](frontend) and has its own
-[README](frontend/README.md) with its own setup/scripts detail. This document
-covers the backend and the whole-stack (Docker) setup.
+- JWT authentication with rotating, reuse-detected refresh tokens
+- Password-protected short links
+- Click-limited links (auto-expire after N clicks)
+- Redis cache-aside redirects
+- Redis-backed rate limiting (fails open if Redis is unavailable)
+- Per-link analytics: clicks over time, countries, browsers, devices, referrers
+- Dockerized development and deployment (Postgres, Redis, API, frontend)
+- Automated test suite (Vitest, backend + frontend)
+- GitHub Actions CI (lint, typecheck, build, test on every push/PR)
 
 ## Architecture
 
-Layered, feature-module backend (`src/modules/<domain>/{controller,service,repository,validation,errors}.ts`),
-one composition root (`src/composition.ts`) wiring everything together, a single
-centralized error-to-HTTP mapping, and a Redis layer that's fail-open everywhere
-it appears (cache and rate limiting both degrade to "as if Redis didn't exist"
-rather than ever blocking a request). Refresh tokens rotate on every use with
-theft/reuse detection; access tokens are short-lived and stateless.
+```
+Next.js Dashboard
+        │
+        ▼
+ Express API
+        │
+ ┌──────┴─────────┐
+ ▼                ▼
+Redis        PostgreSQL
+(Cache)      (Source of Truth)
+```
 
-Design and audit docs live in [`docs/`](docs) — start with
-[`api-v1-spec.md`](docs/api-v1-spec.md) (the REST contract) and
-[`codebase-walkthrough.md`](docs/codebase-walkthrough.md) (a request-lifecycle
-tour: middleware → routing → controller → validation → service → repository →
-Prisma).
+The frontend talks only to the Express API. Postgres is the source of truth;
+Redis sits in front of it as a cache for redirects and as the store for rate
+limiting — if Redis goes down, both degrade to "as if Redis didn't exist"
+rather than blocking requests. Further design notes live under
+[`docs/`](docs).
 
-## Running it
+## Repository Structure
 
-### Option A — Docker Compose (the whole stack)
+```
+frontend/   Next.js dashboard (App Router)
+prisma/     Database schema, migrations, seed script
+src/        Express API (routes, modules, services, repositories)
+tests/      Backend unit + integration tests
+docs/       API spec, architecture and design notes
+```
+
+## Getting Started
+
+### Option A — Docker Compose (whole stack)
+
+Requires Docker running locally.
 
 ```bash
-cp .env.example .env        # then set a real JWT_SECRET (see below)
+git clone https://github.com/nocapgaurav/linkforge.git
+cd linkforge
+cp .env.example .env        # then set a real JWT_SECRET, see below
 docker compose up --build
 ```
 
 This builds and starts all four services — Postgres, Redis, the API
-(`:3000`), and the frontend (`:3001`) — with migrations applied automatically
-on backend startup. Open http://localhost:3001.
+(`:3000`), and the frontend (`:3001`) — and applies migrations automatically
+on backend startup.
 
-### Option B — Local dev (hot reload, no app containers)
+Open http://localhost:3001.
+
+### Option B — Local dev (hot reload)
+
+Backend and frontend run in separate terminals.
+
+**1. Clone and install**
 
 ```bash
+git clone https://github.com/nocapgaurav/linkforge.git
+cd linkforge
 pnpm install
-pnpm db:up              # Postgres + Redis only (docker compose, just the dependencies)
-cp .env.example .env     # then set a real JWT_SECRET
-pnpm db:migrate
-pnpm dev                 # backend on :3000
-
-# in another terminal
-cd frontend && pnpm install && pnpm dev   # frontend on :3001
 ```
 
-Both paths read from the same `docker-compose.yml`; `pnpm db:up` deliberately
-starts only `postgres`/`redis` (not the app services), so it stays fast and
-unchanged whether or not you ever use the full Docker path.
-
-## Environment variables
-
-See [`.env.example`](.env.example) for the full, authoritative list (every
-variable the backend reads is documented there). The one you must set
-yourself: `JWT_SECRET` — generate one with `openssl rand -hex 32`. Everything
-else has a sensible local-dev default.
-
-`frontend/.env.example` documents the one frontend variable
-(`NEXT_PUBLIC_API_URL`) — see [`frontend/README.md`](frontend/README.md).
-
-## Seed data
-
-`prisma/seed.ts` (`pnpm db:seed`) creates a demo account
-(`demo@linkforge.local` / `demo-password`) for local exploration. It's
-idempotent and **refuses to run when `NODE_ENV=production`** — a real
-deployment never gets a demo account created automatically. This is a
-deliberate design fix: an earlier migration used to seed this same account as
-a side effect of a schema change; that migration is immutable (already
-applied everywhere it's ever run) so it's left alone, and a later migration
-(`remove_seeded_demo_user`) removes that one historical row going forward —
-see that migration's comment for the full reasoning.
-
-## Scripts
-
-| Command | What it does |
-|---|---|
-| `pnpm dev` | Backend dev server (tsx watch), port 3000 |
-| `pnpm build` | Compile TypeScript to `dist/` |
-| `pnpm start` | Run the compiled server (`dist/server.js`) |
-| `pnpm lint` | ESLint |
-| `pnpm typecheck` | `tsc --noEmit` |
-| `pnpm test` | Vitest (unit + integration; needs Postgres/Redis running) |
-| `pnpm format` | Prettier, writes in place |
-| `pnpm db:up` / `db:down` | Start/stop Postgres + Redis via Docker Compose |
-| `pnpm db:migrate` | Apply Prisma migrations (dev) |
-| `pnpm db:generate` | Regenerate the Prisma client |
-| `pnpm db:seed` | Seed the local demo account |
-| `pnpm db:studio` | Prisma Studio |
-
-## Testing
+**2. Configure environment variables**
 
 ```bash
-pnpm test              # backend (needs `pnpm db:up` running)
-cd frontend && pnpm test   # frontend
+cp .env.example .env
 ```
 
-Integration tests run against a real Postgres and Redis (not mocks) —
-including a test that stops the actual Redis container mid-test to verify
-rate limiting fails open, not closed. CI (`.github/workflows/ci.yml`) runs
-lint, typecheck, build, and the full test suite for both apps on every push
-and PR.
+Set `JWT_SECRET` in `.env` — generate one with `openssl rand -hex 32`.
+Everything else in `.env.example` has a working local-dev default.
 
-## Security notes
+**3. Start Postgres and Redis** (Docker must be running)
 
-JWT-signed short-lived access tokens (15 min) with rotating, hashed,
-reuse-detected refresh tokens (30 days); bcrypt password hashing; Redis-backed
-rate limiting (fail-open); an anti-enumeration doctrine (dead/other-owner
-links return an identical `404`, never a `403` or a distinguishing message);
-Helmet-applied security headers; CORS restricted to a single configured
-origin. See `docs/api-v1-spec.md` §3–§4, §6, §10–§12 for the specifics.
+```bash
+pnpm db:up
+```
+
+This starts only the `postgres` and `redis` services from
+`docker-compose.yml` — not the app containers.
+
+**4. Run database migrations**
+
+```bash
+pnpm db:migrate
+```
+
+**5. Seed the database** (optional)
+
+```bash
+pnpm db:seed
+```
+
+Creates a demo account (`demo@linkforge.local` / `demo-password`).
+
+**6. Start the backend**
+
+```bash
+pnpm dev
+```
+
+Runs on http://localhost:3000.
+
+**7. Start the frontend** (in a second terminal)
+
+```bash
+cd frontend
+pnpm install
+cp .env.example .env.local
+pnpm dev
+```
+
+Runs on http://localhost:3001.
+
+**8. Open the app**
+
+http://localhost:3001
+
+## Running Tests
+
+```bash
+# Backend (needs `pnpm db:up` running)
+pnpm test
+pnpm lint
+pnpm typecheck
+
+# Frontend
+cd frontend
+pnpm test
+pnpm lint
+pnpm typecheck
+```
+
+## Documentation
+
+- [API Specification](docs/api-v1-spec.md)
+- [Codebase Walkthrough](docs/codebase-walkthrough.md)
+- [URL Entity Design](docs/url-entity-design.md)
+- [Redis Cache Design](docs/redis-cache-design.md)
+- [Analytics Design](docs/analytics-design.md)
 
 ## License
 
-ISC — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE).

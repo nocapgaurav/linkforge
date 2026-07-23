@@ -27,7 +27,7 @@
     "express",
     "typescript"
   ],
-  "license": "ISC",
+  "license": "MIT",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",

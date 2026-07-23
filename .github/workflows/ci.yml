@@ -33,6 +33,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # schema.prisma generates the client to the gitignored src/generated/prisma
+      # (custom output path), so a fresh checkout has no client at all — unlike
+      # a local machine, which accumulates it from `prisma migrate dev` (which
+      # auto-generates as a side effect). CI's later "Apply migrations" step
+      # uses `migrate deploy`, the production-safe command, which does NOT
+      # auto-generate. Generation only reads schema.prisma (no DB needed), so
+      # this runs before Lint/Typecheck/Build and well before Postgres/Redis exist.
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
       - name: Lint
         run: pnpm lint
 
