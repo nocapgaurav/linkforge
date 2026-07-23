@@ -92,6 +92,10 @@ jobs:
           NODE_ENV: test
           PUBLIC_BASE_URL: http://localhost:3000
           ANALYTICS_ENABLED: 'true'
+          # No .env file exists in a fresh checkout, so this must be set
+          # explicitly — matches .env.example's local-dev value, which the
+          # browser-redirect and CORS integration tests assert against.
+          FRONTEND_ORIGIN: http://localhost:3001
 
   frontend:
     name: Frontend (lint, typecheck, build, test)
