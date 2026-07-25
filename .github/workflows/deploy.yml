@@ -137,6 +137,27 @@ jobs:
     env:
       BACKEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-backend
     steps:
+      # TEMPORARY DEBUG STEP — remove once the OIDC subject mismatch is
+      # resolved. Requests the same OIDC token azure/login@v2 is about to
+      # present (same audience), decodes only its payload, and prints the
+      # claims relevant to a federated-credential subject. The signed
+      # token itself is never printed — for its short validity window it
+      # is a usable bearer credential for this exact exchange, so only the
+      # decoded, non-sensitive claims are shown.
+      - name: Debug OIDC subject claim (temporary)
+        run: |
+          RESPONSE=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")
+          PAYLOAD=$(jq -r '.value' <<<"$RESPONSE" | cut -d '.' -f2)
+          PAYLOAD="${PAYLOAD//-/+}"
+          PAYLOAD="${PAYLOAD//_//}"
+          case $(( ${#PAYLOAD} % 4 )) in
+            2) PAYLOAD="${PAYLOAD}==" ;;
+            3) PAYLOAD="${PAYLOAD}=" ;;
+          esac
+          echo "$PAYLOAD" | base64 -d | \
+            jq '{sub, iss, aud, repository, repository_owner, environment, ref}'
+
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -173,6 +194,27 @@ jobs:
     env:
       FRONTEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-frontend
     steps:
+      # TEMPORARY DEBUG STEP — remove once the OIDC subject mismatch is
+      # resolved. Requests the same OIDC token azure/login@v2 is about to
+      # present (same audience), decodes only its payload, and prints the
+      # claims relevant to a federated-credential subject. The signed
+      # token itself is never printed — for its short validity window it
+      # is a usable bearer credential for this exact exchange, so only the
+      # decoded, non-sensitive claims are shown.
+      - name: Debug OIDC subject claim (temporary)
+        run: |
+          RESPONSE=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")
+          PAYLOAD=$(jq -r '.value' <<<"$RESPONSE" | cut -d '.' -f2)
+          PAYLOAD="${PAYLOAD//-/+}"
+          PAYLOAD="${PAYLOAD//_//}"
+          case $(( ${#PAYLOAD} % 4 )) in
+            2) PAYLOAD="${PAYLOAD}==" ;;
+            3) PAYLOAD="${PAYLOAD}=" ;;
+          esac
+          echo "$PAYLOAD" | base64 -d | \
+            jq '{sub, iss, aud, repository, repository_owner, environment, ref}'
+
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
