@@ -160,6 +160,7 @@ pnpm typecheck
 - [URL Entity Design](docs/url-entity-design.md)
 - [Redis Cache Design](docs/redis-cache-design.md)
 - [Analytics Design](docs/analytics-design.md)
+- [Azure Deployment](docs/azure-deployment.md)
 
 ## License
 

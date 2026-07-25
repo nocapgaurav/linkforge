@@ -1,0 +1,191 @@
+name: Deploy
+
+# Runs only after CI has gone green on main — never deploys an unverified
+# commit. workflow_dispatch is the manual escape hatch (e.g. redeploy the
+# same image after an Azure-side config change, with no new commit).
+#
+# IMPORTANT: 'workflows' below must exactly match the `name:` field of the
+# CI workflow (currently "CI", see ci.yml). GitHub matches workflow_run
+# triggers by that display name, not by filename — if they drift apart
+# (e.g. ci.yml's name: is ever renamed), this trigger silently stops
+# firing. No error, no warning: deploys just quietly never happen again.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+  workflow_dispatch:
+
+# Only one production deploy in flight at a time. If commit B's deploy
+# starts while commit A's is still running, A is cancelled outright rather
+# than left to finish and potentially overwrite B's newer deploy with an
+# older image — the group name is fixed (not keyed by ref/sha) because
+# there is only one production target, regardless of which commit is being
+# shipped.
+concurrency:
+  group: azure-deploy
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Gate: only proceed for a workflow_dispatch, or a workflow_run of CI that
+  # succeeded on main. Every later job depends on this one. Also the single
+  # place that lowercases the image owner — GHCR (like all OCI registries)
+  # rejects uppercase in repository names, but GitHub usernames/orgs are
+  # not guaranteed lowercase, so this can't be skipped just because the
+  # current owner happens to be lowercase already.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      owner: ${{ steps.owner.outputs.owner }}
+    steps:
+      - id: sha
+        run: echo "sha=${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+      - id: owner
+        run: echo "owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+  build-push-backend:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BACKEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ env.BACKEND_IMAGE }}:${{ needs.gate.outputs.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  build-push-frontend:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      FRONTEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # NEXT_PUBLIC_API_URL is inlined into the client bundle at build time
+      # (a Next.js constraint, not a choice made here — see frontend/Dockerfile),
+      # so it must be the real production backend URL, supplied as a build
+      # arg. It's a repo VARIABLE, not a secret: it ends up in publicly
+      # readable JS regardless of where it's stored.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:${{ needs.gate.outputs.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  deploy-backend:
+    needs: [gate, build-push-backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      id-token: write
+    env:
+      BACKEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-backend
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Deploys the immutable SHA tag, never :latest — Azure's own polling
+      # for a moving tag is unreliable; pointing the app at a specific,
+      # already-pushed digest makes each deploy explicit and auditable.
+      - uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_BACKEND_APP_NAME }}
+          images: ${{ env.BACKEND_IMAGE }}:${{ needs.gate.outputs.sha }}
+
+      # azure/webapps-deploy only confirms the ARM/Kudu API call succeeded,
+      # not that the new container actually came up healthy — Azure needs
+      # time to pull the image and boot it (migrate deploy runs first, see
+      # Dockerfile CMD). Poll the real health endpoint before declaring the
+      # deploy done; curl's own retry handles the transient "not up yet"
+      # window without a separate retry action.
+      - name: Verify backend is healthy
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 6 --retry-all-errors \
+            "https://${{ vars.AZURE_BACKEND_APP_NAME }}.azurewebsites.net/health"
+
+  deploy-frontend:
+    needs: [gate, build-push-frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      id-token: write
+    env:
+      FRONTEND_IMAGE: ghcr.io/${{ needs.gate.outputs.owner }}/linkforge-frontend
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_FRONTEND_APP_NAME }}
+          images: ${{ env.FRONTEND_IMAGE }}:${{ needs.gate.outputs.sha }}
+
+      - name: Verify frontend is healthy
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 6 --retry-all-errors \
+            "https://${{ vars.AZURE_FRONTEND_APP_NAME }}.azurewebsites.net/"
