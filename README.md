@@ -219,18 +219,6 @@ docs/       Design docs and API specification
 
 ---
 
-## Future Improvements
-
-- Custom domains for short links
-- QR code generation per link
-- Background workers / queue-based click ingestion
-- Distributed / pre-aggregated analytics at high click volumes
-- Multi-region deployment
-- CDN in front of the redirect endpoint
-- Published load-test benchmarks
-
----
-
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
