@@ -1,17 +1,23 @@
 # LinkForge
 
 Most URL shortener tutorials stop at "insert a row, redirect on lookup."
-LinkForge starts there and keeps going. It's a fully deployed, production-shaped
-service built to explore what a shortener looks like once real traffic,
-real failure modes, and real users enter the picture — authenticated
-multi-tenant links, a Redis cache designed to survive an outage instead of
-causing one, privacy-conscious analytics, and a deployment pipeline that
-ships itself from GitHub to Azure with no stored cloud credentials.
-
-**Live demo** — Frontend: [linkforge-web.azurewebsites.net](https://linkforge-web.azurewebsites.net) · Backend API: [linkforge-api.azurewebsites.net/api/v1](https://linkforge-api.azurewebsites.net/api/v1)
+LinkForge starts there and keeps going. It's a fully deployed,
+production-shaped service built to explore what a shortener looks like
+once real traffic, real failure modes, and real users enter the picture —
+authenticated multi-tenant links, a Redis cache designed to survive an
+outage instead of causing one, privacy-conscious analytics, and a
+deployment pipeline that ships itself from GitHub to Azure with no stored
+cloud credentials.
 
 [![CI](https://github.com/nocapgaurav/linkforge/actions/workflows/ci.yml/badge.svg)](https://github.com/nocapgaurav/linkforge/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
+
+---
+
+## Live Demo
+
+- **Frontend** — [linkforge-web.azurewebsites.net](https://linkforge-web.azurewebsites.net)
+- **Backend API** — [linkforge-api.azurewebsites.net/api/v1](https://linkforge-api.azurewebsites.net/api/v1)
 
 ---
 
@@ -35,7 +41,7 @@ ships itself from GitHub to Azure with no stored cloud credentials.
 - Password-protected links
 - Link editing and soft delete
 
-**Auth**
+**Authentication**
 - JWT access tokens with rotating refresh tokens
 - bcrypt password hashing
 - Full account management — profile, password, sessions
@@ -47,7 +53,32 @@ ships itself from GitHub to Azure with no stored cloud credentials.
 **Platform**
 - Redis-backed caching and rate limiting, fail-open by design
 - Docker, GitHub Actions CI/CD, automated Azure deployment
-- 250+ automated tests (unit + integration)
+
+---
+
+## Developer Experience
+
+- Layered, feature-module backend — one vertical slice per domain
+- TypeScript strict mode across both apps
+- A versioned REST contract, written before several endpoints existed
+- Tests run against real Postgres and Redis, not mocks
+- Fully Dockerized local development
+
+---
+
+## Key Engineering Decisions
+
+- **Cache-aside over read-through** — Postgres stays the single source of
+  truth; a Redis outage never becomes a correctness problem, only a
+  slower one.
+- **302, never 301, on redirects** — a cacheable permanent redirect would
+  silently break click counting, expiry, and deactivation.
+- **Redis fails open** — a down cache or rate limiter degrades to "as if
+  Redis didn't exist," never to a blocked request.
+- **Refresh tokens rotate on every use** — replaying an already-used token
+  revokes the whole session, not just that token.
+- **Soft deletes, codes never recycled** — a reissued short code would
+  inherit its previous owner's traffic.
 
 ---
 
@@ -72,90 +103,47 @@ flowchart TD
 ```
 
 The frontend never talks to Postgres or Redis directly — every request
-goes through the Express API. The API is a layered, feature-module backend
-(one vertical slice per domain: controller, service, repository), deployed
-as two independent containers on Azure App Service. Full internals are in
-[Documentation](#documentation) below.
+goes through the Express API. Redis sits in front of Postgres as a cache
+for redirects and a store for rate limiting; if it's unavailable, the
+system falls back to Postgres directly rather than failing. Both apps
+deploy as independent containers on Azure App Service. Full internals are
+in [Documentation](#documentation) below.
 
 ---
 
-## Getting Started
+## Running Locally
+
+### Option A — Docker Compose
 
 ```bash
 git clone https://github.com/nocapgaurav/linkforge.git
 cd linkforge
-cp .env.example .env   # set a real JWT_SECRET — openssl rand -hex 32
+cp .env.example .env   # set a real JWT_SECRET
 docker compose up --build
 ```
 
-Open http://localhost:3001. See [`.env.example`](.env.example) and
+Open http://localhost:3001.
+
+### Option B — Backend and frontend separately
+
+```bash
+pnpm install
+cp .env.example .env
+pnpm db:up
+pnpm db:migrate
+pnpm dev              # backend on :3000
+```
+
+```bash
+cd frontend
+pnpm install
+cp .env.example .env.local
+pnpm dev              # frontend on :3001
+```
+
+See [`.env.example`](.env.example) and
 [`frontend/.env.example`](frontend/.env.example) for the full variable
 reference.
-
----
-
-## Challenges Faced
-
-Real problems hit while building and shipping this project — not
-hypothetical ones.
-
-**Prisma client generation missing in CI, but not locally.** The client is
-generated to a gitignored custom output path. Locally it persisted from
-repeated `prisma migrate dev` runs (which auto-generate as a side effect);
-CI's production-safe `prisma migrate deploy` does not auto-generate, and
-no explicit `prisma generate` step existed — so CI failed with a
-missing-module error that never reproduced locally, until the asymmetry
-between the two migrate commands was identified and an explicit generate
-step was added in the right place (after install, before build — schema
-generation needs no live database).
-
-**A CI-only CORS and browser-redirect test failure.** Two integration
-tests failed only in CI with `204` expected but `401` received on an
-`OPTIONS` preflight. Cause: `FRONTEND_ORIGIN` existed in the local `.env`
-(loaded automatically by `dotenv`) but was never set in CI's own
-environment block — a fresh checkout has no `.env` file at all, so CORS
-and the browser-redirect fallback both silently disabled themselves,
-exactly as designed, in an environment that had simply never been given
-the variable they depend on.
-
-**A fire-and-forget write racing a test's own cleanup.** An integration
-test's `afterAll` occasionally hit a Postgres foreign-key violation when
-deleting its fixture rows. Click-event recording is deliberately
-fire-and-forget in production (the redirect must never wait on an
-analytics write) — but the test's cleanup sometimes ran before that last
-insert completed, leaving a fresh row referencing a `urls` row about to be
-deleted. Fixed with a short settle delay in teardown, a pattern already
-used elsewhere in the same suite for the identical reason.
-
-**Azure OIDC federated identity, and trusting the token over assumptions.**
-An Azure login step failed with `AADSTS700213`, then `AADSTS70025`. Several
-rounds of debugging initially proceeded on an unverified assumption about
-the exact OIDC subject claim GitHub was issuing. The claim was ultimately
-settled by adding a temporary diagnostic step that requested and decoded
-the actual signed OIDC token during a real workflow run, rather than
-trusting documentation or memory — the decoded token was the one artifact
-that couldn't be wrong.
-
-**Next.js build-time environment variables in a containerized deploy.**
-After a successful deployment, registration failed with a `404` missing
-the API's `/api/v1` prefix. The frontend code was correct;
-`NEXT_PUBLIC_API_URL` is inlined at **build** time, not read at container
-start, and the value used for that build was missing the `/api/v1` suffix.
-Confirmed by pulling the deployed bundle and grepping the compiled output
-for the inlined URL — proof from the shipped artifact, not inference from
-the source.
-
----
-
-## Future Improvements
-
-- Custom domains for short links
-- QR code generation per link
-- Background workers / queue-based click ingestion
-- Distributed / pre-aggregated analytics at high click volumes
-- Multi-region deployment
-- CDN in front of the redirect endpoint
-- Published load-test benchmarks
 
 ---
 
@@ -174,15 +162,72 @@ docs/       Design docs and API specification
 
 ## Documentation
 
-Implementation details, design rationale, and operational runbooks live in
-`docs/` rather than here:
-
-- [Architecture & Codebase Walkthrough](docs/codebase-walkthrough.md)
+- [Architecture Walkthrough](docs/codebase-walkthrough.md)
 - [API Specification](docs/api-v1-spec.md)
 - [Database Design](docs/url-entity-design.md)
 - [Cache Design](docs/redis-cache-design.md)
 - [Analytics Design](docs/analytics-design.md)
-- [Deployment](docs/azure-deployment.md)
+- [Deployment Guide](docs/azure-deployment.md)
+
+---
+
+## Engineering Challenges
+
+### Prisma client missing in CI, but not locally
+
+- **Problem:** CI failed on a missing-module error for the generated
+  Prisma client; the same commands worked locally.
+- **Root cause:** The client generates to a gitignored path that persisted
+  locally from repeated `prisma migrate dev` runs (which auto-generate
+  it). CI's `prisma migrate deploy` does not, and no explicit generate
+  step existed.
+- **Solution:** Added an explicit `prisma generate` step before build.
+
+### CI-only CORS and browser-redirect failures
+
+- **Problem:** Two integration tests failed only in CI — `204` expected,
+  `401` received.
+- **Root cause:** `FRONTEND_ORIGIN` existed in the local `.env` but was
+  never set in CI's environment — a fresh checkout has no `.env` file at
+  all.
+- **Solution:** Added `FRONTEND_ORIGIN` to the CI workflow.
+
+### A fire-and-forget write racing test teardown
+
+- **Problem:** An integration test intermittently hit a Postgres
+  foreign-key violation during cleanup.
+- **Root cause:** Click-event recording is fire-and-forget by design; test
+  teardown sometimes ran before the last insert completed.
+- **Solution:** Added a short settle delay before teardown deletes fixture
+  rows.
+
+### Azure OIDC federated identity mismatch
+
+- **Problem:** Azure login failed with `AADSTS700213`, then `AADSTS70025`.
+- **Root cause:** GitHub's actual OIDC subject claim didn't match what the
+  federated credential trusted.
+- **Solution:** Decoded the real signed token during a workflow run and
+  updated the credential to match, rather than guessing at the format.
+
+### Next.js build-time environment variables in a container
+
+- **Problem:** After deployment, registration failed with a `404` missing
+  the API's `/api/v1` prefix.
+- **Root cause:** `NEXT_PUBLIC_API_URL` is inlined at build time, not read
+  at container start — the build used a value missing `/api/v1`.
+- **Solution:** Corrected the build-time variable and rebuilt the image.
+
+---
+
+## Future Improvements
+
+- Custom domains for short links
+- QR code generation per link
+- Background workers / queue-based click ingestion
+- Distributed / pre-aggregated analytics at high click volumes
+- Multi-region deployment
+- CDN in front of the redirect endpoint
+- Published load-test benchmarks
 
 ---
 
